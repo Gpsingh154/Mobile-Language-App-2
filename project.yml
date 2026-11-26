@@ -51,3 +51,4 @@ targets:
         product: sherpa-onnx
       - sdk: AVFoundation.framework
       - sdk: Accelerate.framework
+      - sdk: Speech.framework

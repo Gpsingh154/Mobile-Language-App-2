@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Vaani Local captures microphone audio on-device at 16 kHz to transcribe Indian languages and English completely offline.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Vaani Local uses on-device Apple Speech Recognition when English is selected as your spoken input language.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

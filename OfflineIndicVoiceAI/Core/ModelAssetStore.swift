@@ -111,6 +111,15 @@ public final class ModelAssetStore: NSObject, ObservableObject {
     @Published public var scriptDisplayModeRaw: String {
         didSet { UserDefaults.standard.set(scriptDisplayModeRaw, forKey: Keys.scriptMode) }
     }
+    @Published public var inputLanguageRaw: String {
+        didSet { UserDefaults.standard.set(inputLanguageRaw, forKey: Keys.inputLang) }
+    }
+    @Published public var outputLanguageRaw: String {
+        didSet { UserDefaults.standard.set(outputLanguageRaw, forKey: Keys.outputLang) }
+    }
+    @Published public var interactionModeRaw: String {
+        didSet { UserDefaults.standard.set(interactionModeRaw, forKey: Keys.interactionMode) }
+    }
 
     private enum Keys {
         static let routingMode = "offlineindic.routingMode"
@@ -119,6 +128,9 @@ public final class ModelAssetStore: NSObject, ObservableObject {
         static let kokoroCoreML = "offlineindic.kokoroCoreML"
         static let voiceID = "offlineindic.voiceID"
         static let scriptMode = "offlineindic.scriptMode"
+        static let inputLang = "offlineindic.inputLanguage"
+        static let outputLang = "offlineindic.outputLanguage"
+        static let interactionMode = "offlineindic.interactionMode"
     }
 
     private let logger = Logger(subsystem: "com.offlineindic.voice", category: "ModelAssetStore")
@@ -143,6 +155,9 @@ public final class ModelAssetStore: NSObject, ObservableObject {
         self.useCoreMLForKokoro = defaults.bool(forKey: Keys.kokoroCoreML)
         self.selectedVoiceID = defaults.string(forKey: Keys.voiceID) ?? "af_bella"
         self.scriptDisplayModeRaw = defaults.string(forKey: Keys.scriptMode) ?? "auto"
+        self.inputLanguageRaw = defaults.string(forKey: Keys.inputLang) ?? PipelineLanguage.punjabi.rawValue
+        self.outputLanguageRaw = defaults.string(forKey: Keys.outputLang) ?? PipelineLanguage.english.rawValue
+        self.interactionModeRaw = defaults.string(forKey: Keys.interactionMode) ?? AssistantInteractionMode.translate.rawValue
 
         super.init()
         refreshStatuses()
@@ -172,6 +187,19 @@ public final class ModelAssetStore: NSObject, ObservableObject {
         }
     }
 
+    public var inputLanguage: PipelineLanguage {
+        PipelineLanguage(rawValue: inputLanguageRaw) ?? .punjabi
+    }
+
+    public var outputLanguage: PipelineLanguage {
+        let lang = PipelineLanguage(rawValue: outputLanguageRaw) ?? .english
+        return (lang == .auto) ? .english : lang
+    }
+
+    public var interactionMode: AssistantInteractionMode {
+        AssistantInteractionMode(rawValue: interactionModeRaw) ?? .translate
+    }
+
     public func refreshStatuses() {
         var next: [ModelAssetKind: ModelAssetStatus] = [:]
         for kind in ModelAssetKind.allCases {
@@ -192,10 +220,16 @@ public final class ModelAssetStore: NSObject, ObservableObject {
             indicConformerModelPath: pathFor(.indicConformerONNX),
             tokensPath: pathFor(.indicConformerTokens),
             sileroVadModelPath: pathFor(.sileroVAD),
-            scriptDisplayMode: scriptDisplayMode
+            scriptDisplayMode: scriptDisplayMode,
+            inputLanguage: inputLanguage
         )
         let llm = VoicePipelineConfiguration.LLMConfig(
-            modelPath: pathFor(.gemma4LiteRTLM)
+            modelPath: pathFor(.gemma4LiteRTLM),
+            systemPrompt: GemmaSystemPrompt.build(
+                input: inputLanguage,
+                output: outputLanguage,
+                mode: interactionMode
+            )
         )
         let tts = VoicePipelineConfiguration.TTSConfig(
             kokoroModelPath: pathFor(.kokoro82mONNX),
@@ -210,7 +244,10 @@ public final class ModelAssetStore: NSObject, ObservableObject {
             llm: llm,
             tts: tts,
             residencyPolicy: residencyPolicy,
-            audioRoutingMode: audioRoutingMode
+            audioRoutingMode: audioRoutingMode,
+            inputLanguage: inputLanguage,
+            outputLanguage: outputLanguage,
+            interactionMode: interactionMode
         )
     }
 

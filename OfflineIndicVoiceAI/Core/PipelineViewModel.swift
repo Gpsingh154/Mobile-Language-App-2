@@ -80,6 +80,27 @@ public final class PipelineViewModel: ObservableObject {
         }
     }
 
+    public func applyLanguageAndModeChanges() {
+        Haptics.tap()
+        guard let manager else { return }
+        let input = assetStore.inputLanguage
+        let output = assetStore.outputLanguage
+        let mode = assetStore.interactionMode
+        Task {
+            await manager.updateLanguageSettings(input: input, output: output, mode: mode)
+        }
+    }
+
+    public func swapLanguages() {
+        let currentIn = assetStore.inputLanguage
+        let currentOut = assetStore.outputLanguage
+        let nextIn = currentOut
+        let nextOut = (currentIn == .auto) ? .english : currentIn
+        assetStore.inputLanguageRaw = nextIn.rawValue
+        assetStore.outputLanguageRaw = nextOut.rawValue
+        applyLanguageAndModeChanges()
+    }
+
     public func toggleListening() {
         Haptics.tap()
         guard let manager else {
@@ -117,10 +138,24 @@ public final class PipelineViewModel: ObservableObject {
             rebuildPipelineManager()
             return
         }
+        let inputLang = assetStore.inputLanguage
+        let outputLang = assetStore.outputLanguage
+        let sampleInput: String
+        switch inputLang {
+        case .english: sampleInput = "Hello, how are you doing today?"
+        case .hindi: sampleInput = "नमस्ते, आज मौसम कैसा है?"
+        default: sampleInput = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਅੱਜ ਮੌਸਮ ਕਿਵੇਂ ਹੈ?"
+        }
+        let fallbackResp: String
+        switch outputLang {
+        case .english: fallbackResp = "Hello! I am doing great. The weather looks lovely today."
+        case .hindi: fallbackResp = "NATIVE: नमस्ते! मैं बिल्कुल ठीक हूँ। आज मौसम बहुत अच्छा है।\nSPEAK: Namaste! Main bilkul theek hoon. Aaj mausam bahut achha hai."
+        default: fallbackResp = "NATIVE: ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ਬਿਲਕੁਲ ਵਧੀਆ ਹਾਂ। ਅੱਜ ਮੌਸਮ ਬਹੁਤ ਸੋਹਣਾ ਹੈ।\nSPEAK: Sat sri akaal! Main bilkul vadiya aan. Aaj mausam bahut sohna hai."
+        }
         Task {
             await manager.runSampleTurn(
-                nativeInput: "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਅੱਜ ਮੌਸਮ ਕਿਵੇਂ ਹੈ?",
-                fallbackRomanResponse: "Sat sri akaal! Main bilkul vadiya aan. Aaj mausam bahut sohna hai."
+                nativeInput: sampleInput,
+                fallbackRomanResponse: fallbackResp
             )
         }
     }

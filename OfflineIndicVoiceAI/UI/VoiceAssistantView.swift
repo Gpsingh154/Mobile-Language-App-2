@@ -26,8 +26,10 @@ struct VoiceAssistantView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 telemetryHeader
+
+                languageAndModeBar
 
                 if !viewModel.isRunningLiveWeights {
                     setupNoticeCard
@@ -106,7 +108,107 @@ struct VoiceAssistantView: View {
                 tint: viewModel.availableMemoryMB < 450 ? .red : .cyan
             )
         }
-        .padding(.top, 4)
+        .padding(.top, 2)
+    }
+
+    private var languageAndModeBar: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(PipelineLanguage.allCases) { lang in
+                        Button {
+                            assetStore.inputLanguageRaw = lang.rawValue
+                            viewModel.applyLanguageAndModeChanges()
+                        } label: {
+                            HStack {
+                                Text(lang.shortChipLabel)
+                                if assetStore.inputLanguage == lang {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Speak:")
+                            .foregroundStyle(.secondary)
+                        Text(assetStore.inputLanguage.displayName)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.cyan)
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .padding(.horizontal, 8)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                }
+
+                Button {
+                    viewModel.swapLanguages()
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(8)
+                        .background(Color.indigo.opacity(0.45), in: Circle())
+                }
+
+                Menu {
+                    ForEach(PipelineLanguage.outputCases) { lang in
+                        Button {
+                            assetStore.outputLanguageRaw = lang.rawValue
+                            viewModel.applyLanguageAndModeChanges()
+                        } label: {
+                            HStack {
+                                Text(lang.shortChipLabel)
+                                if assetStore.outputLanguage == lang {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Reply:")
+                            .foregroundStyle(.secondary)
+                        Text(assetStore.outputLanguage.displayName)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.mint)
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .padding(.horizontal, 8)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+
+            HStack(spacing: 6) {
+                ForEach(AssistantInteractionMode.allCases) { mode in
+                    let isSelected = (assetStore.interactionMode == mode)
+                    Button {
+                        assetStore.interactionModeRaw = mode.rawValue
+                        viewModel.applyLanguageAndModeChanges()
+                    } label: {
+                        Label(mode.title, systemImage: mode.iconName)
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .foregroundStyle(isSelected ? .white : .secondary)
+                            .background(
+                                isSelected ? Color.indigo.opacity(0.85) : Color.white.opacity(0.05),
+                                in: RoundedRectangle(cornerRadius: 9)
+                            )
+                    }
+                }
+            }
+        }
     }
 
     private var setupNoticeCard: some View {
@@ -337,8 +439,8 @@ private struct VoiceStateOrb: View {
             ZStack {
                 Circle()
                     .fill(orbColor.opacity(0.22))
-                    .frame(width: 112, height: 112)
-                    .scaleEffect(pulse ? 1.18 : 0.94)
+                    .frame(width: 92, height: 92)
+                    .scaleEffect(pulse ? 1.15 : 0.94)
                     .animation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true), value: pulse)
 
                 Circle()
@@ -346,15 +448,15 @@ private struct VoiceStateOrb: View {
                         RadialGradient(
                             colors: [orbColor.opacity(0.9), orbColor.opacity(0.35)],
                             center: .center,
-                            startRadius: 6,
-                            endRadius: 46
+                            startRadius: 5,
+                            endRadius: 38
                         )
                     )
-                    .frame(width: 82, height: 82)
-                    .shadow(color: orbColor.opacity(0.6), radius: 14)
+                    .frame(width: 68, height: 68)
+                    .shadow(color: orbColor.opacity(0.6), radius: 12)
 
                 Image(systemName: iconName)
-                    .font(.system(size: 28, weight: .semibold))
+                    .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(.white)
             }
             .onAppear { pulse = true }

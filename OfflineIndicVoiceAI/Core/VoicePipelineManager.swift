@@ -24,6 +24,10 @@ import Foundation
 import os
 import UIKit
 
+#if canImport(Speech)
+import Speech
+#endif
+
 #if canImport(SherpaOnnx)
 import SherpaOnnx
 #elseif canImport(sherpa_onnx)
@@ -42,30 +46,170 @@ import onnxruntime_objc
 import onnxruntime
 #endif
 
+// MARK: - Supported Languages & Interaction Modes
+
+public enum PipelineLanguage: String, CaseIterable, Identifiable, Sendable {
+    case auto = "auto"
+    case punjabi = "pa"
+    case hindi = "hi"
+    case english = "en"
+    case bengali = "bn"
+    case tamil = "ta"
+    case telugu = "te"
+    case marathi = "mr"
+    case gujarati = "gu"
+    case kannada = "kn"
+
+    public var id: String { rawValue }
+
+    public static var outputCases: [PipelineLanguage] {
+        allCases.filter { $0 != .auto }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .auto: return "Auto"
+        case .punjabi: return "Punjabi"
+        case .hindi: return "Hindi"
+        case .english: return "English"
+        case .bengali: return "Bengali"
+        case .tamil: return "Tamil"
+        case .telugu: return "Telugu"
+        case .marathi: return "Marathi"
+        case .gujarati: return "Gujarati"
+        case .kannada: return "Kannada"
+        }
+    }
+
+    public var nativeScriptLabel: String {
+        switch self {
+        case .auto: return "Auto"
+        case .punjabi: return "ਪੰਜਾਬੀ"
+        case .hindi: return "हिन्दी"
+        case .english: return "English"
+        case .bengali: return "বাংলা"
+        case .tamil: return "தமிழ்"
+        case .telugu: return "తెలుగు"
+        case .marathi: return "मराठी"
+        case .gujarati: return "ગુજરાતી"
+        case .kannada: return "ಕನ್ನಡ"
+        }
+    }
+
+    public var shortChipLabel: String {
+        switch self {
+        case .auto: return "Auto"
+        case .english: return "English"
+        default: return "\(displayName) (\(nativeScriptLabel))"
+        }
+    }
+}
+
+public enum AssistantInteractionMode: String, CaseIterable, Identifiable, Sendable {
+    case translate = "translate"
+    case smartAnswer = "smartAnswer"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .translate: return "Translate & Learn"
+        case .smartAnswer: return "Smart AI Answer"
+        }
+    }
+
+    public var shortTitle: String {
+        switch self {
+        case .translate: return "Translate"
+        case .smartAnswer: return "AI Answer"
+        }
+    }
+
+    public var iconName: String {
+        switch self {
+        case .translate: return "character.book.closed"
+        case .smartAnswer: return "brain.head.profile"
+        }
+    }
+}
+
 // MARK: - Permanent System Instructions (Gemma 4 E2B-IT)
 
 public enum GemmaSystemPrompt {
-    /// Embedded permanently into every LiteRT-LM conversation session.
-    /// Enforces Romanised phonetic output so Kokoro-82M (English/Hindi weights)
-    /// speaks regional Indian languages naturally without choking on native scripts.
-    public static let transliterationBridge: String = """
-    <system_instructions>
-        <role>You are the ultra-low-latency local AI brain for a voice-to-voice iOS application. Your only job is to process user requests (native Indic scripts or English text) and generate a response optimized for phonetic Text-to-Speech (TTS) synthesis.</role>
-        <core_objective>Analyze the incoming user instruction. Formulate a direct, concise, and conversational response. Output the final response STYLED and SPELLED using Romanised phonetic text (English Latin characters) so the Kokoro engine can read it phonetically.</core_objective>
-        <linguistic_transliteration_rules>
-            1. NATIVE SCRIPT BAN: Never output Devanagari (हिंदी), Gurmukhi (ਪੰਜਾਬੀ), Bengali (বাংলা), Tamil (தமிழ்), or any non-Latin character sets.
-            2. TRANSLITERATION OVER TRANSLATION: If the user speaks in a regional Indian language (e.g., Punjabi), respond back in that SAME language, but map the words to phonetic Roman text (e.g., Input: "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ", Output: "Sat sri akaal! Main vadiya aan, tusi daso?").
-            3. ENGLISH FALLBACK: If the user prompts you in pure English, respond back in natural, clean conversational English.
-            4. COGNITIVE PHONETICS: Spell words the way they SOUND out loud (e.g., "vadiya", "achha") so the TTS pronounces them with a native Indian accent.
-        </linguistic_transliteration_rules>
-        <strict_output_constraints>
-            1. NO CHAT FILLER: Do not include introductory text like "Sure, here is your answer:".
-            2. NO METADATA: Do not output markdown, system notes, or code blocks.
-            3. CONCISE FOR VOICE: Keep responses under 2-3 short sentences to minimize generation and synthesis latency.
-            4. TEXT-ONLY: Output raw, clean string characters only.
-        </strict_output_constraints>
-    </system_instructions>
-    """
+    public static let transliterationBridge: String = build(
+        input: .auto,
+        output: .punjabi,
+        mode: .smartAnswer
+    )
+
+    public static func build(
+        input: PipelineLanguage,
+        output: PipelineLanguage,
+        mode: AssistantInteractionMode
+    ) -> String {
+        let resolvedOutput = (output == .auto) ? .english : output
+        let inputDesc = (input == .auto)
+            ? "the user's spoken language (which may be Punjabi, Hindi, English, or another Indian language)"
+            : "\(input.displayName) (\(input.nativeScriptLabel))"
+
+        let purityRule: String
+        switch resolvedOutput {
+        case .english:
+            purityRule = """
+            Respond ONLY in pure, natural, grammatically correct English. Never mix Hindi, Punjabi, or any non-Latin script.
+            Output ONLY the plain English text with zero labels, zero markdown, and zero filler.
+            """
+        case .hindi:
+            purityRule = """
+            Respond ONLY in pure Hindi. STRICTLY FORBIDDEN: Never use Punjabi words such as "tusi", "mainu", "vadiya", "aan", "sakdaan", "ki gall", or "kiven".
+            Output EXACTLY two lines:
+            NATIVE: <the Hindi response in pure Devanagari script (हिन्दी)>
+            SPEAK: <the EXACT same Hindi response written phonetically in simple English Latin letters for Text-to-Speech, e.g., "Haan ji, main aapko sun sakta hoon. Bataiye main aapki kya madad karoon?">
+            """
+        case .punjabi:
+            purityRule = """
+            Respond ONLY in pure natural Punjabi. STRICTLY FORBIDDEN: Never mix Hindi words such as "aap", "kya", "hoon", "hain", "sakta", "bataiye", or "aapki".
+            Output EXACTLY two lines:
+            NATIVE: <the Punjabi response in pure Gurmukhi script (ਪੰਜਾਬੀ)>
+            SPEAK: <the EXACT same Punjabi response written phonetically in simple English Latin letters for Text-to-Speech, e.g., "Haan ji, main tuhadi gal sun sakda haan. Daso main ki madad karaan?">
+            """
+        default:
+            purityRule = """
+            Respond ONLY in pure natural \(resolvedOutput.displayName) (\(resolvedOutput.nativeScriptLabel)). Do NOT mix words from Hindi, Punjabi, or other languages.
+            Output EXACTLY two lines:
+            NATIVE: <the \(resolvedOutput.displayName) response in pure \(resolvedOutput.nativeScriptLabel) script>
+            SPEAK: <the EXACT same \(resolvedOutput.displayName) response written phonetically in simple English Latin letters for Text-to-Speech>
+            """
+        }
+
+        let taskObjective: String
+        switch mode {
+        case .translate:
+            taskObjective = """
+            Your ONLY task is ACCURATE VOICE TRANSLATION for language learning.
+            The user spoke in \(inputDesc). Note: if the input text looks like phonetic Indic spelling of English words (e.g., "ਆਰ ਯੂ ਏਬਲ ਟੂ ਲੇਸਨ"), understand its spoken meaning accurately.
+            Translate what the user said directly and accurately into \(resolvedOutput.displayName). Do NOT answer their question — ONLY translate their sentence into \(resolvedOutput.displayName).
+            """
+        case .smartAnswer:
+            taskObjective = """
+            Your task is to be a helpful, concise voice AI tutor and assistant.
+            The user spoke in \(inputDesc). Note: if the input text looks like phonetic Indic spelling of English words, understand its spoken meaning accurately.
+            Understand the user's question or statement and give an intelligent, direct, conversational answer (1-2 short sentences) in \(resolvedOutput.displayName).
+            """
+        }
+
+        return """
+        <system_instructions>
+            <role>You are an offline voice-to-voice language learning and AI assistant on iPhone.</role>
+            <task>\(taskObjective)</task>
+            <output_format_rules>
+                \(purityRule)
+                Keep responses concise (1-2 short sentences) for fast voice playback.
+                Do not include conversational filler like "Sure, here is the translation:" and do not use markdown or bullet points.
+            </output_format_rules>
+        </system_instructions>
+        """
+    }
 }
 
 // MARK: - Configuration & Domain Models
@@ -83,6 +227,7 @@ public struct VoicePipelineConfiguration: Sendable {
         public let minSpeechDurationSeconds: Float
         public let maxUtteranceSeconds: Float
         public let scriptDisplayMode: ScriptDisplayMode
+        public let inputLanguage: PipelineLanguage
 
         public init(
             indicConformerModelPath: String,
@@ -95,7 +240,8 @@ public struct VoicePipelineConfiguration: Sendable {
             minSilenceDurationSeconds: Float = 0.45,
             minSpeechDurationSeconds: Float = 0.25,
             maxUtteranceSeconds: Float = 15.0,
-            scriptDisplayMode: ScriptDisplayMode = .auto
+            scriptDisplayMode: ScriptDisplayMode = .auto,
+            inputLanguage: PipelineLanguage = .auto
         ) {
             self.indicConformerModelPath = indicConformerModelPath
             self.tokensPath = tokensPath
@@ -108,6 +254,7 @@ public struct VoicePipelineConfiguration: Sendable {
             self.minSpeechDurationSeconds = minSpeechDurationSeconds
             self.maxUtteranceSeconds = maxUtteranceSeconds
             self.scriptDisplayMode = scriptDisplayMode
+            self.inputLanguage = inputLanguage
         }
     }
 
@@ -204,14 +351,20 @@ public struct VoicePipelineConfiguration: Sendable {
     public let residencyPolicy: ResidencyPolicy
     public let audioRoutingMode: AudioRoutingMode
     public let minimumMemoryHeadroomMB: Int
+    public let inputLanguage: PipelineLanguage
+    public let outputLanguage: PipelineLanguage
+    public let interactionMode: AssistantInteractionMode
 
     public init(
         asr: ASRConfig,
         llm: LLMConfig,
         tts: TTSConfig,
         residencyPolicy: ResidencyPolicy = .adaptiveLowMemory,
-        audioRoutingMode: AudioRoutingMode = .fullDuplexVoiceChatAEC,
-        minimumMemoryHeadroomMB: Int = 450
+        audioRoutingMode: AudioRoutingMode = .halfDuplexGated,
+        minimumMemoryHeadroomMB: Int = 450,
+        inputLanguage: PipelineLanguage = .auto,
+        outputLanguage: PipelineLanguage = .punjabi,
+        interactionMode: AssistantInteractionMode = .smartAnswer
     ) {
         self.asr = asr
         self.llm = llm
@@ -219,6 +372,9 @@ public struct VoicePipelineConfiguration: Sendable {
         self.residencyPolicy = residencyPolicy
         self.audioRoutingMode = audioRoutingMode
         self.minimumMemoryHeadroomMB = minimumMemoryHeadroomMB
+        self.inputLanguage = inputLanguage
+        self.outputLanguage = outputLanguage
+        self.interactionMode = interactionMode
     }
 }
 
@@ -904,26 +1060,26 @@ public enum ASREvent: Sendable {
     case utteranceFinalized(transcript: String, durationSeconds: Double, decodeMs: Double)
 }
 
-// MARK: - Punjabi Gurmukhi Script Normalizer
+// MARK: - Bidirectional Indic Script Normalizer & Phonetic Bridge
 
-/// Converts Devanagari-biased IndicConformer ASR output into authentic Gurmukhi (ਪੰਜਾਬੀ)
-/// when Punjabi vocabulary is detected (in `.auto` mode) or when `.punjabiGurmukhi` is selected,
-/// while preserving Hindi, Tamil, Bengali, Gujarati, or English text untouched.
+/// Enforces pure target script fidelity on ASR output (e.g., pure Gurmukhi for Punjabi,
+/// pure Devanagari for Hindi without stray Gurmukhi letters, and phonetic Latin rescue for offline English)
+/// and provides a native-to-Roman phonetic fallback for Kokoro TTS.
 public enum IndicScriptNormalizer {
     private static let punjabiMarkers: [String] = [
-        "मैनू", "मैनूं", "तैनू", "तैनूं", "तुसी", "तुसीं", "असीं", "साडा", "साडी", "साडे",
+        "मैनू", "मैनूं", "मीनू", "तैनू", "तैनूं", "तुसी", "तुसीं", "असीं", "साडा", "साडी", "साडे",
         "तुहाडा", "तुहाडी", "तुहाडे", "किवें", "किद्दां", "की हाल", "वदिया", "वधिया",
         "चंगा", "चंगी", "गल्लां", "गल", "सत श्री", "अकाल", "पंजाब", "करदा", "करदी",
         "होंदा", "होंदी", "नूं", "आं", "दां", "दियां", "वेख", "सुण", "दस", "दसो", "पाजी",
-        "हाँजी", "हांजी", "आ गया", "समझ आ", "की कर", "कित्थे", "किधर", "होवे"
+        "हाँजी", "हांजी", "आ गया", "समझ आ", "की कर", "कित्थे", "किधर", "होवे", "सकदे"
     ]
 
-    private static let multiCharMap: [(String, String)] = [
+    private static let devaToGurmMulti: [(String, String)] = [
         ("क़", "ਕ"), ("ख़", "ਖ਼"), ("ग़", "ਗ਼"), ("ज़", "ਜ਼"), ("ड़", "ੜ"), ("ढ़", "ੜ੍ਹ"), ("फ़", "ਫ਼"),
         ("क्ष", "ਕਸ਼"), ("त्र", "ਤ੍ਰ"), ("ज्ञ", "ਗ੍ਯ"), ("श्र", "ਸ਼੍ਰ")
     ]
 
-    private static let charMap: [Character: String] = [
+    private static let devaToGurmChar: [Character: String] = [
         "अ": "ਅ", "आ": "ਆ", "इ": "ਇ", "ई": "ਈ", "उ": "ਉ", "ऊ": "ਊ",
         "ए": "ਏ", "ऐ": "ਐ", "ओ": "ਓ", "औ": "ਔ", "ऋ": "ਰਿ",
         "क": "ਕ", "ख": "ਖ", "ग": "ਗ", "घ": "ਘ", "ङ": "ਙ",
@@ -934,47 +1090,155 @@ public enum IndicScriptNormalizer {
         "य": "ਯ", "र": "ਰ", "ल": "ਲ", "ळ": "ਲ਼", "व": "ਵ",
         "श": "ਸ਼", "ष": "ਸ਼", "स": "ਸ", "ह": "ਹ",
         "ा": "ਾ", "ि": "ਿ", "ी": "ੀ", "ु": "ੁ", "ू": "ੂ",
-        "े": "ੇ", "ै": "ੈ", "ो": "ੋ", "ौ": "ਔ".replacingOccurrences(of: "ਔ", with: "ੌ"),
+        "े": "ੇ", "ै": "ੈ", "ो": "ੋ", "ौ": "ੌ",
         "ं": "ੰ", "ँ": "ਂ", "ः": "ਃ", "्": "੍", "़": "",
         "।": "।", "॥": "॥",
         "०": "੦", "१": "੧", "२": "੨", "३": "੩", "४": "੪",
         "५": "੫", "६": "੬", "७": "੭", "८": "੮", "९": "੯"
     ]
 
-    public static func normalize(_ text: String, mode: VoicePipelineConfiguration.ScriptDisplayMode) -> String {
-        guard mode != .nativeASR else { return text }
-        let containsDevanagari = text.unicodeScalars.contains { $0.value >= 0x0900 && $0.value <= 0x097F }
-        guard containsDevanagari else { return text }
+    private static let gurmToDevaMulti: [(String, String)] = [
+        ("ਖ਼", "ख़"), ("ਗ਼", "ग़"), ("ਜ਼", "ज़"), ("ਫ਼", "फ़"), ("ਲ਼", "ळ"), ("ਸ਼", "श"), ("ੜ੍ਹ", "ढ़")
+    ]
 
-        if mode == .auto {
-            let isPunjabi = punjabiMarkers.contains { text.contains($0) }
-            guard isPunjabi else { return text }
+    private static let gurmToDevaChar: [Character: String] = [
+        "ਅ": "अ", "ਆ": "आ", "ਇ": "इ", "ਈ": "ई", "ਉ": "उ", "ਊ": "ऊ",
+        "ਏ": "ए", "ਐ": "ऐ", "ਓ": "ओ", "ਔ": "औ",
+        "ਕ": "क", "ਖ": "ख", "ਗ": "ग", "ਘ": "घ", "ਙ": "ङ",
+        "ਚ": "च", "ਛ": "छ", "ਜ": "ज", "ਝ": "झ", "ਞ": "ञ",
+        "ਟ": "ट", "ਠ": "ठ", "ਡ": "ड", "ਢ": "ढ", "ਣ": "ण",
+        "ਤ": "त", "ਥ": "थ", "ਦ": "द", "ਧ": "ध", "ਨ": "न",
+        "ਪ": "प", "ਫ": "फ", "ਬ": "ब", "ਭ": "भ", "ਮ": "म",
+        "ਯ": "य", "ਰ": "र", "ਲ": "ल", "ਵ": "व", "ਸ": "स", "ਹ": "ह", "ੜ": "ड़",
+        "ਾ": "ा", "ਿ": "ि", "ੀ": "ी", "ੁ": "ु", "ੂ": "ू",
+        "ੇ": "े", "ੈ": "ै", "ੋ": "ो", "ੌ": "ौ",
+        "ੰ": "ं", "ਂ": "ं", "ੱ": "", "ਃ": "ः", "੍": "्", "਼": "",
+        "੦": "०", "੧": "१", "੨": "२", "੩": "३", "੪": "४",
+        "੫": "५", "੬": "६", "੭": "७", "੮": "८", "੯": "९"
+    ]
+
+    public static func normalize(
+        _ text: String,
+        inputLanguage: PipelineLanguage,
+        legacyMode: VoicePipelineConfiguration.ScriptDisplayMode = .auto
+    ) -> String {
+        switch inputLanguage {
+        case .punjabi:
+            return convertDevanagariToGurmukhi(text)
+        case .hindi, .marathi:
+            return convertGurmukhiToDevanagari(text)
+        case .english:
+            let hasIndic = text.unicodeScalars.contains {
+                ($0.value >= 0x0900 && $0.value <= 0x097F) || ($0.value >= 0x0A00 && $0.value <= 0x0A7F)
+            }
+            return hasIndic ? toPhoneticLatin(text) : text
+        case .auto:
+            guard legacyMode != .nativeASR else { return text }
+            if legacyMode == .punjabiGurmukhi {
+                return convertDevanagariToGurmukhi(text)
+            }
+            let hasGurmukhi = text.unicodeScalars.contains { $0.value >= 0x0A00 && $0.value <= 0x0A7F }
+            let isPunjabi = hasGurmukhi || punjabiMarkers.contains { text.contains($0) }
+            if isPunjabi {
+                return convertDevanagariToGurmukhi(text)
+            }
+            return convertGurmukhiToDevanagari(text)
+        default:
+            return text
         }
+    }
+
+    public static func convertDevanagariToGurmukhi(_ text: String) -> String {
+        let containsDeva = text.unicodeScalars.contains { $0.value >= 0x0900 && $0.value <= 0x097F }
+        guard containsDeva else { return text }
 
         var working = text
-        for (src, dst) in multiCharMap {
+        for (src, dst) in devaToGurmMulti {
             working = working.replacingOccurrences(of: src, with: dst)
         }
-
         var out = String()
         out.reserveCapacity(working.count)
         for ch in working {
-            if let mapped = charMap[ch] {
-                out.append(mapped)
-            } else {
-                out.append(ch)
-            }
+            out.append(devaToGurmChar[ch] ?? String(ch))
         }
-
-        // Common Gurmukhi nasal/spelling polish
         let polish: [(String, String)] = [
-            ("ਮੈਨੂ ", "ਮੈਨੂੰ "), ("ਮੈਨੂ", "ਮੈਨੂੰ"),
-            ("ਤੈਨੂ ", "ਤੈਨੂੰ "), ("ਤੁਸੀ ", "ਤੁਸੀਂ "), ("ਅਸੀ ", "ਅਸੀਂ "),
-            ("ਨਹੀ ", "ਨਹੀਂ "), ("ਹਾਂ ਜੀ", "ਹਾਂਜੀ"), ("ਸਤਿ ਸ੍ਰੀ", "ਸਤਿ ਸ੍ਰੀ"),
-            ("ਸਤ ਸ੍ਰੀ", "ਸਤਿ ਸ੍ਰੀ")
+            ("ਮੈਨੂ", "ਮੈਨੂੰ"), ("ਮੀਨੂ", "ਮੈਨੂੰ"), ("ਤੈਨੂ", "ਤੈਨੂੰ"),
+            ("ਤੁਸੀ", "ਤੁਸੀਂ"), ("ਅਸੀ", "ਅਸੀਂ"), ("ਨਹੀ ", "ਨਹੀਂ "),
+            ("ਹਾਂ ਜੀ", "ਹਾਂਜੀ"), ("ਸਤ ਸ੍ਰੀ", "ਸਤਿ ਸ੍ਰੀ")
         ]
         for (k, v) in polish {
             out = out.replacingOccurrences(of: k, with: v)
+        }
+        return out
+    }
+
+    public static func convertGurmukhiToDevanagari(_ text: String) -> String {
+        let containsGurm = text.unicodeScalars.contains { $0.value >= 0x0A00 && $0.value <= 0x0A7F }
+        guard containsGurm else { return text }
+
+        var working = text
+        for (src, dst) in gurmToDevaMulti {
+            working = working.replacingOccurrences(of: src, with: dst)
+        }
+        var out = String()
+        out.reserveCapacity(working.count)
+        for ch in working {
+            out.append(gurmToDevaChar[ch] ?? String(ch))
+        }
+        return out
+    }
+
+    /// Converts Gurmukhi or Devanagari characters into speakable Latin phonetics.
+    public static func toPhoneticLatin(_ text: String) -> String {
+        let deva = convertGurmukhiToDevanagari(text)
+        let consonants: [Character: String] = [
+            "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
+            "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "ny",
+            "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n",
+            "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
+            "प": "p", "फ": "ph", "ब": "b", "भ": "bh", "म": "m",
+            "य": "y", "र": "r", "ल": "l", "ळ": "l", "व": "v",
+            "श": "sh", "ष": "sh", "स": "s", "ह": "h", "ड़": "r"
+        ]
+        let indepVowels: [Character: String] = [
+            "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo",
+            "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au"
+        ]
+        let matras: [Character: String] = [
+            "ा": "aa", "ि": "i", "ी": "ee", "ु": "u", "ू": "oo",
+            "े": "e", "ै": "ai", "ो": "o", "ौ": "au", "्": ""
+        ]
+        let scalars = Array(deva)
+        var out = ""
+        var i = 0
+        while i < scalars.count {
+            let ch = scalars[i]
+            if let c = consonants[ch] {
+                out.append(c)
+                if i + 1 < scalars.count, let m = matras[scalars[i + 1]] {
+                    out.append(m)
+                    i += 2
+                } else {
+                    if i + 1 < scalars.count && scalars[i + 1] != " " {
+                        out.append("a")
+                    }
+                    i += 1
+                }
+            } else if let v = indepVowels[ch] {
+                out.append(v)
+                i += 1
+            } else if ch == "ं" || ch == "ँ" {
+                out.append("n")
+                i += 1
+            } else if ch == "।" {
+                out.append(". ")
+                i += 1
+            } else if ch == "़" {
+                i += 1
+            } else {
+                out.append(ch)
+                i += 1
+            }
         }
         return out
     }
@@ -983,6 +1247,7 @@ public enum IndicScriptNormalizer {
 public protocol ASREngineProtocol: Actor {
     var isLoaded: Bool { get }
     func initialize() async throws
+    func updateInputLanguage(_ language: PipelineLanguage, legacyMode: VoicePipelineConfiguration.ScriptDisplayMode)
     func processPCMChunk(_ chunk: PCM16kChunk) async throws -> [ASREvent]
     func resetVAD()
     func unloadModel() async
@@ -990,11 +1255,16 @@ public protocol ASREngineProtocol: Actor {
 
 public actor SherpaIndicConformerASR: ASREngineProtocol {
     private let logger = Logger(subsystem: "com.offlineindic.voice", category: "SherpaASR")
-    private let config: VoicePipelineConfiguration.ASRConfig
+    private var config: VoicePipelineConfiguration.ASRConfig
 
     public private(set) var isLoaded: Bool = false
     private var floatScratchBuffer: [Float] = []
     private var isCurrentlyInSpeech: Bool = false
+
+    #if canImport(Speech)
+    private let englishSpeechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-IN"))
+        ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    #endif
 
     #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
     private var recognizer: SherpaOnnxOfflineRecognizer?
@@ -1007,6 +1277,67 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
 
     public init(config: VoicePipelineConfiguration.ASRConfig) {
         self.config = config
+    }
+
+    public func updateInputLanguage(_ language: PipelineLanguage, legacyMode: VoicePipelineConfiguration.ScriptDisplayMode) {
+        self.config = VoicePipelineConfiguration.ASRConfig(
+            indicConformerModelPath: config.indicConformerModelPath,
+            tokensPath: config.tokensPath,
+            sileroVadModelPath: config.sileroVadModelPath,
+            sampleRate: config.sampleRate,
+            numThreads: config.numThreads,
+            provider: config.provider,
+            vadThreshold: config.vadThreshold,
+            minSilenceDurationSeconds: config.minSilenceDurationSeconds,
+            minSpeechDurationSeconds: config.minSpeechDurationSeconds,
+            maxUtteranceSeconds: config.maxUtteranceSeconds,
+            scriptDisplayMode: legacyMode,
+            inputLanguage: language
+        )
+    }
+
+    private func recognizeEnglishIfAuthorized(samples: [Float], sampleRate: Double) async -> String? {
+        #if canImport(Speech)
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized,
+              let speechRec = englishSpeechRecognizer,
+              speechRec.isAvailable else {
+            return nil
+        }
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else {
+            return nil
+        }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        if let dst = buffer.floatChannelData?[0] {
+            samples.withUnsafeBufferPointer { src in
+                if let base = src.baseAddress {
+                    dst.initialize(from: base, count: samples.count)
+                }
+            }
+        }
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        if speechRec.supportsOnDeviceRecognition {
+            request.requiresOnDeviceRecognition = true
+        }
+        request.shouldReportPartialResults = false
+        request.append(buffer)
+        request.endAudio()
+
+        return await withCheckedContinuation { continuation in
+            var resumed = false
+            speechRec.recognitionTask(with: request) { result, error in
+                if let result, result.isFinal, !resumed {
+                    resumed = true
+                    continuation.resume(returning: result.bestTranscription.formattedString)
+                } else if error != nil, !resumed {
+                    resumed = true
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+        #else
+        return nil
+        #endif
     }
 
     public func initialize() async throws {
@@ -1095,13 +1426,26 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
             let boundedSamples = samples.count > maxSamples ? Array(samples.prefix(maxSamples)) : samples
 
             let decodeStart = CFAbsoluteTimeGetCurrent()
-            let result = recognizer.decode(samples: boundedSamples, sampleRate: Int(config.sampleRate))
+            var finalText = ""
+            if config.inputLanguage == .english,
+               let appleEnglish = await recognizeEnglishIfAuthorized(samples: boundedSamples, sampleRate: Double(config.sampleRate)),
+               !appleEnglish.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+                finalText = appleEnglish.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            } else {
+                let result = recognizer.decode(samples: boundedSamples, sampleRate: Int(config.sampleRate))
+                let rawText = result.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                if !rawText.isEmpty {
+                    finalText = IndicScriptNormalizer.normalize(
+                        rawText,
+                        inputLanguage: config.inputLanguage,
+                        legacyMode: config.scriptDisplayMode
+                    )
+                }
+            }
             let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1000.0
-            let text = result.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            if !text.isEmpty {
-                let normalizedText = IndicScriptNormalizer.normalize(text, mode: config.scriptDisplayMode)
+            if !finalText.isEmpty {
                 let duration = Double(boundedSamples.count) / Double(config.sampleRate)
-                events.append(.utteranceFinalized(transcript: normalizedText, durationSeconds: duration, decodeMs: decodeMs))
+                events.append(.utteranceFinalized(transcript: finalText, durationSeconds: duration, decodeMs: decodeMs))
             }
         }
         #else
@@ -1165,6 +1509,7 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
 public protocol LLMBrainProtocol: Actor {
     var isLoaded: Bool { get }
     func loadEngine() async throws
+    func updateSystemPrompt(_ newPrompt: String) async throws
     func streamResponse(for userTranscript: String) -> AsyncThrowingStream<String, Error>
     func resetConversation() async throws
     func unloadEngine() async
@@ -1172,7 +1517,7 @@ public protocol LLMBrainProtocol: Actor {
 
 public actor LiteRTLMGemmaBrain: LLMBrainProtocol {
     private let logger = Logger(subsystem: "com.offlineindic.voice", category: "LiteRTLMGemma")
-    private let config: VoicePipelineConfiguration.LLMConfig
+    private var config: VoicePipelineConfiguration.LLMConfig
 
     public private(set) var isLoaded: Bool = false
     private var turnCount: Int = 0
@@ -1209,6 +1554,25 @@ public actor LiteRTLMGemmaBrain: LLMBrainProtocol {
         #endif
 
         isLoaded = true
+    }
+
+    public func updateSystemPrompt(_ newPrompt: String) async throws {
+        self.config = VoicePipelineConfiguration.LLMConfig(
+            modelPath: config.modelPath,
+            cacheDirectory: config.cacheDirectory,
+            maxContextTokens: config.maxContextTokens,
+            topK: config.topK,
+            topP: config.topP,
+            temperature: config.temperature,
+            maxTurnsBeforeKVReset: config.maxTurnsBeforeKVReset,
+            systemPrompt: newPrompt
+        )
+        turnCount = 0
+        #if canImport(LiteRTLM)
+        if engine != nil {
+            try await createFreshConversation()
+        }
+        #endif
     }
 
     public func resetConversation() async throws {
@@ -1800,7 +2164,7 @@ public final class VoicePipelineManager: ObservableObject {
     public let events = PassthroughSubject<VoicePipelineEvent, Never>()
 
     private let logger = Logger(subsystem: "com.offlineindic.voice", category: "PipelineManager")
-    private let config: VoicePipelineConfiguration
+    private var config: VoicePipelineConfiguration
     private let audioIO: AudioPipelineIO
     private let asrEngine: ASREngineProtocol
     private let llmBrain: LLMBrainProtocol
@@ -1848,6 +2212,10 @@ public final class VoicePipelineManager: ObservableObject {
             return
         }
 
+        if config.inputLanguage == .english {
+            await requestEnglishSpeechPermissionIfNeeded()
+        }
+
         do {
             try verifyHeadroomBeforeWarmup()
             try audioIO.configureAndStart()
@@ -1887,6 +2255,68 @@ public final class VoicePipelineManager: ObservableObject {
             await unloadAllModels()
         }
         transition(to: .uninitialized)
+    }
+
+    /// Hot-swaps Input Language, Output Language, and Translate/Answer Mode without unloading loaded weights.
+    public func updateLanguageSettings(
+        input: PipelineLanguage,
+        output: PipelineLanguage,
+        mode: AssistantInteractionMode
+    ) async {
+        let newPrompt = GemmaSystemPrompt.build(input: input, output: output, mode: mode)
+        let newASR = VoicePipelineConfiguration.ASRConfig(
+            indicConformerModelPath: config.asr.indicConformerModelPath,
+            tokensPath: config.asr.tokensPath,
+            sileroVadModelPath: config.asr.sileroVadModelPath,
+            sampleRate: config.asr.sampleRate,
+            numThreads: config.asr.numThreads,
+            provider: config.asr.provider,
+            vadThreshold: config.asr.vadThreshold,
+            minSilenceDurationSeconds: config.asr.minSilenceDurationSeconds,
+            minSpeechDurationSeconds: config.asr.minSpeechDurationSeconds,
+            maxUtteranceSeconds: config.asr.maxUtteranceSeconds,
+            scriptDisplayMode: config.asr.scriptDisplayMode,
+            inputLanguage: input
+        )
+        let newLLM = VoicePipelineConfiguration.LLMConfig(
+            modelPath: config.llm.modelPath,
+            cacheDirectory: config.llm.cacheDirectory,
+            maxContextTokens: config.llm.maxContextTokens,
+            topK: config.llm.topK,
+            topP: config.llm.topP,
+            temperature: config.llm.temperature,
+            maxTurnsBeforeKVReset: config.llm.maxTurnsBeforeKVReset,
+            systemPrompt: newPrompt
+        )
+        self.config = VoicePipelineConfiguration(
+            asr: newASR,
+            llm: newLLM,
+            tts: config.tts,
+            residencyPolicy: config.residencyPolicy,
+            audioRoutingMode: config.audioRoutingMode,
+            minimumMemoryHeadroomMB: config.minimumMemoryHeadroomMB,
+            inputLanguage: input,
+            outputLanguage: output,
+            interactionMode: mode
+        )
+        await asrEngine.updateInputLanguage(input, legacyMode: config.asr.scriptDisplayMode)
+        try? await llmBrain.updateSystemPrompt(newPrompt)
+
+        if input == .english && state == .listening {
+            await requestEnglishSpeechPermissionIfNeeded()
+        }
+    }
+
+    private func requestEnglishSpeechPermissionIfNeeded() async {
+        #if canImport(Speech)
+        if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                SFSpeechRecognizer.requestAuthorization { _ in
+                    cont.resume()
+                }
+            }
+        }
+        #endif
     }
 
     /// Triggers a sample turn with full TTS audio playback through the iPhone speaker.
@@ -1936,11 +2366,16 @@ public final class VoicePipelineManager: ObservableObject {
             }
 
             try await ttsEngine.loadSession()
-            let fullText = streamingResponseText
+            let parsedSample = Self.formatAndExtractSpeakable(
+                raw: streamingResponseText,
+                outputLanguage: config.outputLanguage
+            )
+            streamingResponseText = parsedSample.displayText
+            let speakSource = parsedSample.speakText
             var chunker = TransliterationStreamChunker()
-            var clauses = chunker.append(token: fullText)
+            var clauses = chunker.append(token: speakSource)
             if let tail = chunker.flush() { clauses.append(tail) }
-            if clauses.isEmpty && !fullText.isEmpty { clauses = [fullText] }
+            if clauses.isEmpty && !speakSource.isEmpty { clauses = [speakSource] }
 
             for clause in clauses {
                 let samples24k = try await ttsEngine.synthesize(
@@ -2047,24 +2482,24 @@ public final class VoicePipelineManager: ObservableObject {
                 // LiteRT-LM uses mmap so dirty footprint is ~600-800 MB; if already loaded, always reuse it!
                 let canUseGemma = llmAlreadyLoaded || (MemoryBudgetManager.availableMemoryMB() >= 1000)
 
-                var generatedClauses: [String] = []
+                var rawLLMText = ""
                 if canUseGemma {
                     do {
                         let tokenStream = await self.llmBrain.streamResponse(for: transcript)
-                        var chunker = TransliterationStreamChunker()
                         for try await token in tokenStream {
                             try Task.checkCancellation()
                             firstTokenTimeBox.withLock { value in
                                 if value == nil { value = CFAbsoluteTimeGetCurrent() }
                             }
+                            rawLLMText.append(token)
+                            let formattedLive = Self.formatLiveStreamingDisplay(
+                                raw: rawLLMText,
+                                outputLanguage: self.config.outputLanguage
+                            )
                             await MainActor.run {
-                                self.streamingResponseText.append(token)
+                                self.streamingResponseText = formattedLive
                                 self.events.send(.llmTokenReceived(token))
                             }
-                            generatedClauses.append(contentsOf: chunker.append(token: token))
-                        }
-                        if let tail = chunker.flush() {
-                            generatedClauses.append(tail)
                         }
                         if self.config.residencyPolicy != .alwaysResident,
                            MemoryBudgetManager.availableMemoryMB() < 550 {
@@ -2075,17 +2510,26 @@ public final class VoicePipelineManager: ObservableObject {
                     }
                 }
 
-                if generatedClauses.isEmpty && self.streamingResponseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let fallback = self.buildCompactLocalFallback(for: transcript)
+                if rawLLMText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    rawLLMText = self.buildCompactLocalFallback(for: transcript)
                     firstTokenTimeBox.withLock { $0 = CFAbsoluteTimeGetCurrent() }
-                    await MainActor.run {
-                        self.streamingResponseText = fallback
-                        self.events.send(.llmTokenReceived(fallback))
-                    }
-                    var chunker = TransliterationStreamChunker()
-                    generatedClauses.append(contentsOf: chunker.append(token: fallback))
-                    if let tail = chunker.flush() { generatedClauses.append(tail) }
-                    if generatedClauses.isEmpty { generatedClauses = [fallback] }
+                }
+
+                let parsed = Self.formatAndExtractSpeakable(
+                    raw: rawLLMText,
+                    outputLanguage: self.config.outputLanguage
+                )
+                await MainActor.run {
+                    self.streamingResponseText = parsed.displayText
+                }
+
+                var chunker = TransliterationStreamChunker()
+                var generatedClauses = chunker.append(token: parsed.speakText)
+                if let tail = chunker.flush() {
+                    generatedClauses.append(tail)
+                }
+                if generatedClauses.isEmpty && !parsed.speakText.isEmpty {
+                    generatedClauses = [parsed.speakText]
                 }
 
                 // Ensure Kokoro ORT session is warm before speaking clauses.
@@ -2170,6 +2614,60 @@ public final class VoicePipelineManager: ObservableObject {
         case .strictForegroundOnly:
             return false
         }
+    }
+
+    private static func formatLiveStreamingDisplay(
+        raw: String,
+        outputLanguage: PipelineLanguage
+    ) -> String {
+        let cleaned = raw
+            .replacingOccurrences(of: "NATIVE:", with: "")
+            .replacingOccurrences(of: "SPEAK:", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned
+    }
+
+    private static func formatAndExtractSpeakable(
+        raw: String,
+        outputLanguage: PipelineLanguage
+    ) -> (displayText: String, speakText: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ("", "") }
+
+        var nativePart = ""
+        var speakPart = ""
+
+        let lines = trimmed.components(separatedBy: .newlines)
+        for line in lines {
+            let l = line.trimmingCharacters(in: .whitespaces)
+            if l.uppercased().hasPrefix("NATIVE:") {
+                nativePart = String(l.dropFirst("NATIVE:".count)).trimmingCharacters(in: .whitespaces)
+            } else if l.uppercased().hasPrefix("SPEAK:") {
+                speakPart = String(l.dropFirst("SPEAK:".count)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        if outputLanguage == .english {
+            let best = !speakPart.isEmpty ? speakPart : (!nativePart.isEmpty ? nativePart : trimmed)
+            let stripped = best
+                .replacingOccurrences(of: "NATIVE:", with: "")
+                .replacingOccurrences(of: "SPEAK:", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeSpeak = IndicScriptNormalizer.toPhoneticLatin(stripped)
+            return (stripped, safeSpeak)
+        }
+
+        if !nativePart.isEmpty && !speakPart.isEmpty {
+            return ("\(nativePart)\n(\(speakPart))", IndicScriptNormalizer.toPhoneticLatin(speakPart))
+        } else if !speakPart.isEmpty {
+            return (speakPart, IndicScriptNormalizer.toPhoneticLatin(speakPart))
+        } else if !nativePart.isEmpty {
+            let latin = IndicScriptNormalizer.toPhoneticLatin(nativePart)
+            return ("\(nativePart)\n(\(latin))", latin)
+        }
+
+        let fallbackSpeak = IndicScriptNormalizer.toPhoneticLatin(trimmed)
+        return (trimmed, fallbackSpeak)
     }
 
     private func buildCompactLocalFallback(for transcript: String) -> String {
