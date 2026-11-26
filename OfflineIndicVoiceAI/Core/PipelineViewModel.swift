@@ -47,10 +47,10 @@ public final class PipelineViewModel: ObservableObject {
     private var manager: VoicePipelineManager?
     private var cancellables = Set<AnyCancellable>()
 
-    /// True if all native frameworks (`SherpaOnnx`, `LiteRTLM`, `OnnxRuntimeBindings`) are linked
+    /// True if all native frameworks (`SherpaOnnx`, `LiteRTLM`, `onnxruntime`) are linked
     /// AND required weight files are present on disk.
     public var isRunningLiveWeights: Bool {
-        #if (canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED) && canImport(LiteRTLM) && (canImport(OnnxRuntimeBindings) || canImport(onnxruntime_objc))
+        #if (canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED) && canImport(LiteRTLM) && (canImport(OnnxRuntimeBindings) || canImport(onnxruntime_objc) || canImport(onnxruntime))
         return assetStore.allRequiredAssetsInstalled
         #else
         return false
@@ -110,52 +110,18 @@ public final class PipelineViewModel: ObservableObject {
         lastMetrics = nil
     }
 
-    /// Triggers a simulated 16 kHz Punjabi utterance when evaluating UI/pipeline wiring
-    /// in structural mock mode without downloaded model weights.
+    /// Triggers a sample 16 kHz Punjabi utterance and speaks the response through Kokoro TTS.
     public func runMockSampleTurn() {
         Haptics.tap()
+        guard let manager else {
+            rebuildPipelineManager()
+            return
+        }
         Task {
-            let previousState = pipelineState
-            let sampleNativeInput = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਅੱਜ ਮੌਸਮ ਕਿਵੇਂ ਹੈ?"
-            liveUserTranscript = sampleNativeInput
-            liveAssistantText = ""
-            pipelineState = .thinking
-
-            let brain = LiteRTLMGemmaBrain(config: assetStore.buildPipelineConfiguration().llm)
-            var chunker = TransliterationStreamChunker()
-            let start = CFAbsoluteTimeGetCurrent()
-            var firstTokenMs: Double = 0
-
-            do {
-                try await brain.loadEngine()
-                for try await token in await brain.streamResponse(for: sampleNativeInput) {
-                    if firstTokenMs == 0 {
-                        firstTokenMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
-                    }
-                    liveAssistantText.append(token)
-                    _ = chunker.append(token: token)
-                }
-                _ = chunker.flush()
-                let totalMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
-                let metrics = TurnLatencyMetrics(
-                    asrDecodeMs: 42.0,
-                    llmFirstTokenMs: firstTokenMs,
-                    ttsFirstClauseMs: firstTokenMs + 65.0,
-                    totalTurnMs: totalMs
-                )
-                lastMetrics = metrics
-                history.append(
-                    ConversationTurn(
-                        userNativeTranscript: sampleNativeInput,
-                        assistantRomanisedText: liveAssistantText,
-                        metrics: metrics
-                    )
-                )
-                pipelineState = (previousState == .listening) ? .listening : .uninitialized
-            } catch {
-                bannerErrorMessage = error.localizedDescription
-                pipelineState = .error(error.localizedDescription)
-            }
+            await manager.runSampleTurn(
+                nativeInput: "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਅੱਜ ਮੌਸਮ ਕਿਵੇਂ ਹੈ?",
+                fallbackRomanResponse: "Sat sri akaal! Main bilkul vadiya aan. Aaj mausam bahut sohna hai."
+            )
         }
     }
 

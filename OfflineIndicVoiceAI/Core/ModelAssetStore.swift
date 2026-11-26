@@ -132,7 +132,7 @@ public final class ModelAssetStore: NSObject, ObservableObject {
 
     public override init() {
         let defaults = UserDefaults.standard
-        self.audioRoutingModeRaw = defaults.string(forKey: Keys.routingMode) ?? "fullDuplex"
+        self.audioRoutingModeRaw = defaults.string(forKey: Keys.routingMode) ?? "halfDuplex"
         self.residencyPolicyRaw = defaults.string(forKey: Keys.residencyPolicy) ?? "adaptive"
         let savedSpeed = defaults.double(forKey: Keys.ttsSpeed)
         self.ttsSpeed = savedSpeed > 0 ? savedSpeed : 1.0

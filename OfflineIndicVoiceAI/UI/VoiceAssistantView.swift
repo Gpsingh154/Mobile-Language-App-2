@@ -182,7 +182,7 @@ struct VoiceAssistantView: View {
                 withAnimation { proxy.scrollTo("active-turn", anchor: .bottom) }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
     }
 
     private var emptyPromptPlaceholder: some View {
@@ -220,17 +220,16 @@ struct VoiceAssistantView: View {
 
     private var bottomControlDock: some View {
         VStack(spacing: 10) {
-            if !viewModel.isRunningLiveWeights {
-                Button {
-                    viewModel.runMockSampleTurn()
-                } label: {
-                    Label("Run Sample Punjabi Turn (Mock)", systemImage: "play.circle.fill")
-                        .font(.subheadline.weight(.medium))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .tint(.cyan)
+            Button {
+                viewModel.runMockSampleTurn()
+            } label: {
+                Label("Test Sample Punjabi Turn", systemImage: "play.circle.fill")
+                    .font(.subheadline.weight(.medium))
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.bordered)
+            .tint(.cyan)
+            .disabled(isActiveSession)
 
             HStack(spacing: 18) {
                 Button {

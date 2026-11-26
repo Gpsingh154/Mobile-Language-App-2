@@ -38,6 +38,8 @@ import LiteRTLM
 import OnnxRuntimeBindings
 #elseif canImport(onnxruntime_objc)
 import onnxruntime_objc
+#elseif canImport(onnxruntime)
+import onnxruntime
 #endif
 
 // MARK: - Permanent System Instructions (Gemma 4 E2B-IT)
@@ -750,7 +752,7 @@ public final class AudioPipelineIO: @unchecked Sendable {
         )
 
         // Tap MUST match `hwFormat` to prevent CoreAudio format mismatch exceptions.
-        let hwBufferSize = AVAudioFrameCount(hwFormat.sampleRate * 0.02)
+        let hwBufferSize = max(AVAudioFrameCount(1024), AVAudioFrameCount(hwFormat.sampleRate * 0.02))
         inputNode.installTap(onBus: 0, bufferSize: hwBufferSize, format: hwFormat) { [weak self] buffer, when in
             self?.processTapBuffer(buffer, hostTime: when.hostTime)
         }
@@ -1355,6 +1357,12 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
     private var ortSession: ORTSession?
     private var cachedInputNames: Set<String> = []
     private var cachedOutputName: String = "waveform"
+    #elseif canImport(onnxruntime)
+    private var ortApi: UnsafePointer<OrtApi>?
+    private var ortEnv: OpaquePointer?
+    private var ortSession: OpaquePointer?
+    private var cachedInputNames: Set<String> = []
+    private var cachedOutputName: String = "waveform"
     #endif
 
     public init(
@@ -1392,6 +1400,61 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
         self.cachedInputNames = Set(try session.inputNames())
         if let firstOutput = try session.outputNames().first {
             self.cachedOutputName = firstOutput
+        }
+        #elseif canImport(onnxruntime)
+        guard FileManager.default.fileExists(atPath: config.kokoroModelPath) else {
+            throw VoicePipelineError.modelFileMissing(config.kokoroModelPath)
+        }
+        self.voicePack = try KokoroVoicePack(voicePackPath: config.voicePackPath)
+
+        guard let apiBase = OrtGetApiBase(),
+              let api = apiBase.pointee.GetApi(UInt32(ORT_API_VERSION)) else {
+            throw VoicePipelineError.engineNotInitialized("Failed to initialize ONNX Runtime C API")
+        }
+        self.ortApi = api
+
+        var env: OpaquePointer?
+        try checkORTStatus(api.pointee.CreateEnv(ORT_LOGGING_LEVEL_WARNING, "KokoroTTS", &env), api: api)
+
+        var opts: OpaquePointer?
+        try checkORTStatus(api.pointee.CreateSessionOptions(&opts), api: api)
+        defer { if let opts { api.pointee.ReleaseSessionOptions(opts) } }
+
+        try checkORTStatus(api.pointee.SetIntraOpNumThreads(opts, Int32(config.intraOpThreads)), api: api)
+        try checkORTStatus(api.pointee.SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL), api: api)
+
+        var session: OpaquePointer?
+        try config.kokoroModelPath.withCString { pathPtr in
+            try checkORTStatus(api.pointee.CreateSession(env, pathPtr, opts, &session), api: api)
+        }
+
+        self.ortEnv = env
+        self.ortSession = session
+
+        var allocator: UnsafeMutablePointer<OrtAllocator>?
+        try checkORTStatus(api.pointee.GetAllocatorWithDefaultOptions(&allocator), api: api)
+        var inputCount: Int = 0
+        try checkORTStatus(api.pointee.SessionGetInputCount(session, &inputCount), api: api)
+        var names = Set<String>()
+        for i in 0..<inputCount {
+            var namePtr: UnsafeMutablePointer<CChar>?
+            try checkORTStatus(api.pointee.SessionGetInputName(session, i, allocator, &namePtr), api: api)
+            if let namePtr {
+                names.insert(String(cString: namePtr))
+                allocator?.pointee.Free(allocator, namePtr)
+            }
+        }
+        self.cachedInputNames = names
+
+        var outputCount: Int = 0
+        try checkORTStatus(api.pointee.SessionGetOutputCount(session, &outputCount), api: api)
+        if outputCount > 0 {
+            var outNamePtr: UnsafeMutablePointer<CChar>?
+            try checkORTStatus(api.pointee.SessionGetOutputName(session, 0, allocator, &outNamePtr), api: api)
+            if let outNamePtr {
+                self.cachedOutputName = String(cString: outNamePtr)
+                allocator?.pointee.Free(allocator, outNamePtr)
+            }
         }
         #else
         logger.info("Initialized structural mock KokoroONNXSynthesizer (link OnnxRuntimeBindings SPM package for live synthesis).")
@@ -1472,6 +1535,97 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
             }
             return samples
         }
+        #elseif canImport(onnxruntime)
+        guard let api = ortApi, let ortSession, let voicePack else {
+            throw VoicePipelineError.engineNotInitialized("Kokoro ORT C Session")
+        }
+
+        var paddedInputIDs: [Int64] = [0]
+        paddedInputIDs.reserveCapacity(rawTokens.count + 2)
+        paddedInputIDs.append(contentsOf: rawTokens)
+        paddedInputIDs.append(0)
+
+        var styleVector = voicePack.styleVector(forTokenCount: rawTokens.count)
+        var speedScalar: [Float] = [speed]
+
+        return try autoreleasepool {
+            var memInfo: OpaquePointer?
+            try checkORTStatus(api.pointee.CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memInfo), api: api)
+            defer { if let memInfo { api.pointee.ReleaseMemoryInfo(memInfo) } }
+
+            var inputIDsValue: OpaquePointer?
+            var styleValue: OpaquePointer?
+            var speedValue: OpaquePointer?
+            defer {
+                if let inputIDsValue { api.pointee.ReleaseValue(inputIDsValue) }
+                if let styleValue { api.pointee.ReleaseValue(styleValue) }
+                if let speedValue { api.pointee.ReleaseValue(speedValue) }
+            }
+
+            var idShape: [Int64] = [1, Int64(paddedInputIDs.count)]
+            try paddedInputIDs.withUnsafeMutableBytes { rawBuf in
+                try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
+                    memInfo, rawBuf.baseAddress, rawBuf.count, &idShape, 2,
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &inputIDsValue
+                ), api: api)
+            }
+
+            var styleShape: [Int64] = [1, 256]
+            try styleVector.withUnsafeMutableBytes { rawBuf in
+                try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
+                    memInfo, rawBuf.baseAddress, rawBuf.count, &styleShape, 2,
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &styleValue
+                ), api: api)
+            }
+
+            var speedShape: [Int64] = [1]
+            try speedScalar.withUnsafeMutableBytes { rawBuf in
+                try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
+                    memInfo, rawBuf.baseAddress, rawBuf.count, &speedShape, 1,
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &speedValue
+                ), api: api)
+            }
+
+            let tokenInputKey = cachedInputNames.contains("input_ids") ? "input_ids" : "tokens"
+            let cInputNames: [UnsafePointer<CChar>?] = [
+                UnsafePointer(strdup(tokenInputKey)),
+                UnsafePointer(strdup("style")),
+                UnsafePointer(strdup("speed"))
+            ]
+            defer { cInputNames.forEach { if let p = $0 { free(UnsafeMutablePointer(mutating: p)) } } }
+
+            let cOutputName = UnsafePointer(strdup(cachedOutputName))
+            defer { if let p = cOutputName { free(UnsafeMutablePointer(mutating: p)) } }
+
+            var inputs: [OpaquePointer?] = [inputIDsValue, styleValue, speedValue]
+            var outputNames: [UnsafePointer<CChar>?] = [cOutputName]
+            var outputValues: [OpaquePointer?] = [nil]
+
+            try checkORTStatus(api.pointee.Run(
+                ortSession, nil,
+                cInputNames, &inputs, 3,
+                outputNames, 1, &outputValues
+            ), api: api)
+
+            guard let outVal = outputValues[0] else {
+                throw VoicePipelineError.invalidTensorShape("Missing output tensor '\(cachedOutputName)'.")
+            }
+            defer { api.pointee.ReleaseValue(outVal) }
+
+            var typeInfo: OpaquePointer?
+            try checkORTStatus(api.pointee.GetTensorTypeAndShape(outVal, &typeInfo), api: api)
+            defer { if let typeInfo { api.pointee.ReleaseTensorTypeAndShapeInfo(typeInfo) } }
+
+            var elemCount: Int = 0
+            try checkORTStatus(api.pointee.GetTensorShapeElementCount(typeInfo, &elemCount), api: api)
+
+            var outDataPtr: UnsafeMutableRawPointer?
+            try checkORTStatus(api.pointee.GetTensorMutableData(outVal, &outDataPtr), api: api)
+
+            guard let outDataPtr, elemCount > 0 else { return [] }
+            let floatPtr = outDataPtr.assumingMemoryBound(to: Float.self)
+            return Array(UnsafeBufferPointer(start: floatPtr, count: elemCount))
+        }
         #else
         // Structural mock: synthesize short gentle silence/tone proportional to clause length at 24kHz.
         let durationSeconds = min(2.5, max(0.35, Double(rawTokens.count) * 0.02))
@@ -1485,11 +1639,29 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
         ortSession = nil
         ortEnv = nil
         cachedInputNames.removeAll()
+        #elseif canImport(onnxruntime)
+        if let ortSession { ortApi?.pointee.ReleaseSession(ortSession) }
+        if let ortEnv { ortApi?.pointee.ReleaseEnv(ortEnv) }
+        ortSession = nil
+        ortEnv = nil
+        ortApi = nil
+        cachedInputNames.removeAll()
         #endif
         voicePack = nil
         isLoaded = false
         logger.info("Unloaded Kokoro 82M ORT session & voice pack.")
     }
+
+    #if canImport(onnxruntime)
+    private func checkORTStatus(_ status: OpaquePointer?, api: UnsafePointer<OrtApi>) throws {
+        if let status {
+            let msgPtr = api.pointee.GetErrorMessage(status)
+            let msg = msgPtr.map { String(cString: $0) } ?? "Unknown ONNX Runtime error"
+            api.pointee.ReleaseStatus(status)
+            throw VoicePipelineError.engineNotInitialized("ORT error: \(msg)")
+        }
+    }
+    #endif
 }
 
 // MARK: - Deliverable 4: End-to-End Reactive Pipeline Manager
@@ -1558,9 +1730,12 @@ public final class VoicePipelineManager: ObservableObject {
             try audioIO.configureAndStart()
 
             // Load heavy runtimes respecting device RAM policy:
-            // ASR + LLM first; TTS loads eagerly on >= 8GB devices or lazily under adaptive policy.
+            // Under adaptive/strict policy on Sideloadly / <=6GB devices, only keep ASR (~200MB)
+            // resident while listening so we stay well under iOS Jetsam limits.
             try await asrEngine.initialize()
-            try await llmBrain.loadEngine()
+            if config.residencyPolicy == .alwaysResident || MemoryBudgetManager.availableMemoryMB() > 3800 {
+                try await llmBrain.loadEngine()
+            }
             if shouldKeepTTSWarm() {
                 try await ttsEngine.loadSession()
             }
@@ -1589,6 +1764,81 @@ public final class VoicePipelineManager: ObservableObject {
             await unloadAllModels()
         }
         transition(to: .uninitialized)
+    }
+
+    /// Triggers a sample turn with full TTS audio playback through the iPhone speaker.
+    public func runSampleTurn(nativeInput: String, fallbackRomanResponse: String) async {
+        lastTranscript = nativeInput
+        streamingResponseText = ""
+        events.send(.transcriptRecognized(nativeInput))
+        transition(to: .thinking)
+
+        let turnStart = CFAbsoluteTimeGetCurrent()
+        var firstTokenTime: CFAbsoluteTime?
+        var firstAudioTime: CFAbsoluteTime?
+
+        do {
+            try audioIO.configureAndStart()
+
+            if config.residencyPolicy != .alwaysResident {
+                await asrEngine.unloadModel()
+            }
+
+            // Generate text via Gemma 4 if enough RAM headroom exists, otherwise use fallback
+            var responseTokens: [String] = []
+            if MemoryBudgetManager.availableMemoryMB() >= 1800 {
+                do {
+                    try await llmBrain.loadEngine()
+                    let stream = await llmBrain.streamResponse(for: nativeInput)
+                    for try await token in stream {
+                        if firstTokenTime == nil { firstTokenTime = CFAbsoluteTimeGetCurrent() }
+                        streamingResponseText.append(token)
+                        responseTokens.append(token)
+                    }
+                } catch {
+                    logger.warning("Gemma 4 sample turn fallback: \(error.localizedDescription)")
+                }
+            }
+
+            if responseTokens.isEmpty {
+                firstTokenTime = CFAbsoluteTimeGetCurrent()
+                streamingResponseText = fallbackRomanResponse
+            }
+
+            try await ttsEngine.loadSession()
+            let fullText = streamingResponseText
+            var chunker = TransliterationStreamChunker()
+            var clauses = chunker.append(token: fullText)
+            if let tail = chunker.flush() { clauses.append(tail) }
+            if clauses.isEmpty && !fullText.isEmpty { clauses = [fullText] }
+
+            for clause in clauses {
+                let samples24k = try await ttsEngine.synthesize(
+                    phoneticClause: clause,
+                    speed: config.tts.speed
+                )
+                if firstAudioTime == nil {
+                    firstAudioTime = CFAbsoluteTimeGetCurrent()
+                    transition(to: .speaking)
+                }
+                await audioIO.enqueuePlayback(samples24k: samples24k, maxQueuedBuffers: 2)
+            }
+            await audioIO.waitForPlaybackDrain()
+
+            let now = CFAbsoluteTimeGetCurrent()
+            let metrics = TurnLatencyMetrics(
+                asrDecodeMs: 42.0,
+                llmFirstTokenMs: ((firstTokenTime ?? now) - turnStart) * 1000.0,
+                ttsFirstClauseMs: ((firstAudioTime ?? now) - turnStart) * 1000.0,
+                totalTurnMs: (now - turnStart) * 1000.0
+            )
+            lastLatencyMetrics = metrics
+            events.send(.turnCompleted(metrics))
+            transition(to: .uninitialized)
+        } catch {
+            logger.error("Sample turn failed: \(error.localizedDescription)")
+            transition(to: .error(error.localizedDescription))
+        }
     }
 
     /// Supports user barge-in or manual cancellation: stops current LLM generation
