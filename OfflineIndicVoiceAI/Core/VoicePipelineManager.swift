@@ -553,6 +553,27 @@ public final class AudioPipelineIO: @unchecked Sendable {
         }
     }
 
+    public func configureForPlaybackOnly() throws {
+        try graphQueue.sync {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+
+            if !audioEngine.attachedNodes.contains(playerNode) {
+                audioEngine.attach(playerNode)
+                audioEngine.connect(
+                    playerNode,
+                    to: audioEngine.mainMixerNode,
+                    format: playbackFormat24kFloatMono
+                )
+            }
+            if !audioEngine.isRunning {
+                audioEngine.prepare()
+                try audioEngine.start()
+            }
+        }
+    }
+
     public func configureAndStart() throws {
         try graphQueue.sync {
             let session = AVAudioSession.sharedInstance()
@@ -1563,28 +1584,8 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
             }
 
             var idShape: [Int64] = [1, Int64(paddedInputIDs.count)]
-            try paddedInputIDs.withUnsafeMutableBytes { rawBuf in
-                try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
-                    memInfo, rawBuf.baseAddress, rawBuf.count, &idShape, 2,
-                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &inputIDsValue
-                ), api: api)
-            }
-
             var styleShape: [Int64] = [1, 256]
-            try styleVector.withUnsafeMutableBytes { rawBuf in
-                try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
-                    memInfo, rawBuf.baseAddress, rawBuf.count, &styleShape, 2,
-                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &styleValue
-                ), api: api)
-            }
-
             var speedShape: [Int64] = [1]
-            try speedScalar.withUnsafeMutableBytes { rawBuf in
-                try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
-                    memInfo, rawBuf.baseAddress, rawBuf.count, &speedShape, 1,
-                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &speedValue
-                ), api: api)
-            }
 
             let tokenInputKey = cachedInputNames.contains("input_ids") ? "input_ids" : "tokens"
             let cInputNames: [UnsafePointer<CChar>?] = [
@@ -1597,15 +1598,35 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
             let cOutputName = UnsafePointer(strdup(cachedOutputName))
             defer { if let p = cOutputName { free(UnsafeMutablePointer(mutating: p)) } }
 
-            var inputs: [OpaquePointer?] = [inputIDsValue, styleValue, speedValue]
-            var outputNames: [UnsafePointer<CChar>?] = [cOutputName]
             var outputValues: [OpaquePointer?] = [nil]
 
-            try checkORTStatus(api.pointee.Run(
-                ortSession, nil,
-                cInputNames, &inputs, 3,
-                outputNames, 1, &outputValues
-            ), api: api)
+            try paddedInputIDs.withUnsafeMutableBytes { idBuf in
+                try styleVector.withUnsafeMutableBytes { styleBuf in
+                    try speedScalar.withUnsafeMutableBytes { speedBuf in
+                        try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
+                            memInfo, idBuf.baseAddress, idBuf.count, &idShape, 2,
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &inputIDsValue
+                        ), api: api)
+                        try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
+                            memInfo, styleBuf.baseAddress, styleBuf.count, &styleShape, 2,
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &styleValue
+                        ), api: api)
+                        try checkORTStatus(api.pointee.CreateTensorWithDataAsOrtValue(
+                            memInfo, speedBuf.baseAddress, speedBuf.count, &speedShape, 1,
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &speedValue
+                        ), api: api)
+
+                        var inputs: [OpaquePointer?] = [inputIDsValue, styleValue, speedValue]
+                        var outputNames: [UnsafePointer<CChar>?] = [cOutputName]
+
+                        try checkORTStatus(api.pointee.Run(
+                            ortSession, nil,
+                            cInputNames, &inputs, 3,
+                            outputNames, 1, &outputValues
+                        ), api: api)
+                    }
+                }
+            }
 
             guard let outVal = outputValues[0] else {
                 throw VoicePipelineError.invalidTensorShape("Missing output tensor '\(cachedOutputName)'.")
@@ -1778,15 +1799,20 @@ public final class VoicePipelineManager: ObservableObject {
         var firstAudioTime: CFAbsoluteTime?
 
         do {
-            try audioIO.configureAndStart()
+            try audioIO.configureForPlaybackOnly()
 
             if config.residencyPolicy != .alwaysResident {
                 await asrEngine.unloadModel()
             }
 
-            // Generate text via Gemma 4 if enough RAM headroom exists, otherwise use fallback
+            // Generate text via Gemma 4 only if free Jetsam headroom comfortably exceeds model file size + 650 MB overhead
             var responseTokens: [String] = []
-            if MemoryBudgetManager.availableMemoryMB() >= 1800 {
+            let modelAttrs = try? FileManager.default.attributesOfItem(atPath: config.llm.modelPath)
+            let modelBytes = (modelAttrs?[.size] as? NSNumber)?.intValue ?? 0
+            let modelMB = modelBytes / (1024 * 1024)
+            let requiredHeadroomMB = max(1800, modelMB + 650)
+
+            if MemoryBudgetManager.availableMemoryMB() >= requiredHeadroomMB {
                 do {
                     try await llmBrain.loadEngine()
                     let stream = await llmBrain.streamResponse(for: nativeInput)
@@ -1798,6 +1824,8 @@ public final class VoicePipelineManager: ObservableObject {
                 } catch {
                     logger.warning("Gemma 4 sample turn fallback: \(error.localizedDescription)")
                 }
+            } else {
+                logger.info("Skipping Gemma 4 (\(modelMB) MB) in sample turn due to Jetsam headroom (\(MemoryBudgetManager.availableMemoryMB()) MB < \(requiredHeadroomMB) MB).")
             }
 
             if responseTokens.isEmpty {

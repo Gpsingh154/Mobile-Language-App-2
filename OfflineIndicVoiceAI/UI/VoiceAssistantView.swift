@@ -26,37 +26,38 @@ struct VoiceAssistantView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
+            VStack(spacing: 10) {
+                telemetryHeader
+
+                if !viewModel.isRunningLiveWeights {
+                    setupNoticeCard
+                }
+
+                if let errorText = viewModel.bannerErrorMessage {
+                    errorBanner(errorText)
+                }
+
+                VoiceStateOrb(
+                    state: viewModel.pipelineState,
+                    isUserSpeaking: viewModel.isUserSpeaking
+                )
+                .padding(.vertical, 2)
+
+                conversationFeed
+
+                bottomControlDock
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
                 LinearGradient(
                     colors: [Color(red: 0.05, green: 0.07, blue: 0.12), Color(red: 0.08, green: 0.10, blue: 0.17)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
                 .ignoresSafeArea()
-
-                VStack(spacing: 16) {
-                    telemetryHeader
-
-                    if !viewModel.isRunningLiveWeights {
-                        setupNoticeCard
-                    }
-
-                    if let errorText = viewModel.bannerErrorMessage {
-                        errorBanner(errorText)
-                    }
-
-                    VoiceStateOrb(
-                        state: viewModel.pipelineState,
-                        isUserSpeaking: viewModel.isUserSpeaking
-                    )
-                    .padding(.vertical, 6)
-
-                    conversationFeed
-
-                    bottomControlDock
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
             }
             .navigationTitle("Vaani Local")
             .navigationBarTitleDisplayMode(.inline)
@@ -182,7 +183,7 @@ struct VoiceAssistantView: View {
                 withAnimation { proxy.scrollTo("active-turn", anchor: .bottom) }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var emptyPromptPlaceholder: some View {
@@ -282,14 +283,15 @@ private struct StatusPill: View {
     let tint: Color
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Image(systemName: icon)
                 .foregroundStyle(tint)
             Text(text)
-                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .font(.caption2.weight(.semibold))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
         .background(Color.white.opacity(0.08), in: Capsule())
     }
 }
