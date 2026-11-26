@@ -9,7 +9,7 @@ options:
 packages:
   LiteRTLM:
     url: https://github.com/google-ai-edge/LiteRT-LM
-    branch: main
+    exact: "v0.20.0"
   SherpaOnnx:
     url: https://github.com/k2-fsa/sherpa-onnx
     branch: master
