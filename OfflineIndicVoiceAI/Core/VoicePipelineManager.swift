@@ -1947,56 +1947,59 @@ public final class VoicePipelineManager: ObservableObject {
             self.transition(to: .thinking)
 
             do {
-                // Under strict/adaptive low-memory policy, temporarily free ASR weights if needed
-                // before heavy LLM + TTS execution.
-                if self.config.residencyPolicy == .adaptiveLowMemory,
-                   MemoryBudgetManager.availableMemoryMB() < self.config.minimumMemoryHeadroomMB {
+                // Free ASR + TTS before Gemma 4 under adaptive/strict low-memory policies
+                // so the 2.59 GB model gets full Jetsam headroom.
+                if self.config.residencyPolicy != .alwaysResident {
                     await self.asrEngine.unloadModel()
+                    await self.ttsEngine.unloadSession()
                 }
 
-                // Concurrent Stage 3 -> Stage 4 pipeline:
-                // Producer (Gemma 4 token stream -> Clause Chunker) feeds Consumer (Kokoro TTS -> Playback)
-                // via a bounded AsyncStream so Sentence 1 plays while Sentence 2 is still generating.
-                let clauseStream = AsyncStream<String>(bufferingPolicy: .bufferingNewest(8)) { clauseCont in
-                    let producerTask = Task {
-                        var chunker = TransliterationStreamChunker()
-                        let tokenStream = await self.llmBrain.streamResponse(for: transcript)
+                let llmAttrs = try? FileManager.default.attributesOfItem(atPath: self.config.llm.modelPath)
+                let llmBytes = (llmAttrs?[.size] as? NSNumber)?.intValue ?? 0
+                let llmMB = llmBytes / (1024 * 1024)
+                let minSafeHeadroom = max(1200, llmMB + 250)
+                let canLoadGemma = (MemoryBudgetManager.availableMemoryMB() >= minSafeHeadroom)
 
-                        do {
-                            for try await token in tokenStream {
-                                if Task.isCancelled { break }
-                                firstTokenTimeBox.withLock { value in
-                                    if value == nil { value = CFAbsoluteTimeGetCurrent() }
-                                }
-                                await MainActor.run {
-                                    self.streamingResponseText.append(token)
-                                    self.events.send(.llmTokenReceived(token))
-                                }
-                                for readyClause in chunker.append(token: token) {
-                                    clauseCont.yield(readyClause)
-                                }
-                            }
-                            if let tail = chunker.flush() {
-                                clauseCont.yield(tail)
-                            }
-                        } catch {
-                            await MainActor.run {
-                                self.logger.error("LLM streaming error: \(error.localizedDescription)")
-                            }
+                var generatedClauses: [String] = []
+                if canLoadGemma {
+                    let tokenStream = await self.llmBrain.streamResponse(for: transcript)
+                    var chunker = TransliterationStreamChunker()
+                    for try await token in tokenStream {
+                        try Task.checkCancellation()
+                        firstTokenTimeBox.withLock { value in
+                            if value == nil { value = CFAbsoluteTimeGetCurrent() }
                         }
-                        clauseCont.finish()
+                        await MainActor.run {
+                            self.streamingResponseText.append(token)
+                            self.events.send(.llmTokenReceived(token))
+                        }
+                        generatedClauses.append(contentsOf: chunker.append(token: token))
                     }
-
-                    clauseCont.onTermination = { _ in
-                        producerTask.cancel()
+                    if let tail = chunker.flush() {
+                        generatedClauses.append(tail)
                     }
+                    if self.config.residencyPolicy != .alwaysResident,
+                       MemoryBudgetManager.availableMemoryMB() < 550 {
+                        await self.llmBrain.unloadEngine()
+                    }
+                } else {
+                    let fallback = self.buildCompactLocalFallback(for: transcript)
+                    firstTokenTimeBox.withLock { $0 = CFAbsoluteTimeGetCurrent() }
+                    await MainActor.run {
+                        self.streamingResponseText = fallback
+                        self.events.send(.llmTokenReceived(fallback))
+                    }
+                    var chunker = TransliterationStreamChunker()
+                    generatedClauses.append(contentsOf: chunker.append(token: fallback))
+                    if let tail = chunker.flush() { generatedClauses.append(tail) }
+                    if generatedClauses.isEmpty { generatedClauses = [fallback] }
                 }
 
-                // Ensure Kokoro ORT session is warm before consuming clauses.
+                // Ensure Kokoro ORT session is warm before speaking clauses.
                 try await self.ttsEngine.loadSession()
 
                 try await withTaskCancellationHandler {
-                    for await clause in clauseStream {
+                    for clause in generatedClauses {
                         try Task.checkCancellation()
 
                         let samples24k = try await self.ttsEngine.synthesize(
@@ -2010,8 +2013,6 @@ public final class VoicePipelineManager: ObservableObject {
                             self.transition(to: .speaking)
                         }
                         self.events.send(.ttsClauseSynthesized(clause: clause, sampleCount: samples24k.count))
-                        // Gapless queuing: enqueues onto AVAudioPlayerNode immediately so Kokoro can
-                        // synthesize the next clause while the current clause is playing.
                         await self.audioIO.enqueuePlayback(samples24k: samples24k, maxQueuedBuffers: 2)
                     }
 
@@ -2023,12 +2024,12 @@ public final class VoicePipelineManager: ObservableObject {
 
                 self.audioIO.setPlaybackCaptureGate(active: false)
 
+                if !self.shouldKeepTTSWarm() {
+                    await self.ttsEngine.unloadSession()
+                }
                 // Re-warm ASR if it was paged out during low-memory generation.
                 if !(await self.asrEngine.isLoaded) {
                     try await self.asrEngine.initialize()
-                }
-                if !self.shouldKeepTTSWarm() {
-                    await self.ttsEngine.unloadSession()
                 }
 
                 let now = CFAbsoluteTimeGetCurrent()
@@ -2076,6 +2077,11 @@ public final class VoicePipelineManager: ObservableObject {
         case .strictForegroundOnly:
             return false
         }
+    }
+
+    private func buildCompactLocalFallback(for transcript: String) -> String {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "Main tuhadi gal suni: \(trimmed). Gemma 4 nu \(MemoryBudgetManager.availableMemoryMB()) MB RAM vich load karan layi hor khali memory chahidi hai."
     }
 
     private func handleMemoryPressure(level: MemoryPressureLevel, availableMB: Int) async {

@@ -48,6 +48,9 @@ jobs:
         run: |
           APP_PATH="build/Build/Products/Release-iphoneos/VaaniLocal.app"
           test -d "$APP_PATH"
+          plutil -p "$APP_PATH/Info.plist"
+          plutil -p "$APP_PATH/Info.plist" | grep -q "NSMicrophoneUsageDescription"
+          plutil -p "$APP_PATH/Info.plist" | grep -q "UIFileSharingEnabled"
           rm -rf Payload VaaniLocal-Sideloadly.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/

@@ -167,7 +167,7 @@ struct VoiceAssistantView: View {
                             .id(turn.id)
                     }
 
-                    if !viewModel.liveUserTranscript.isEmpty || !viewModel.liveAssistantText.isEmpty {
+                    if !viewModel.liveUserTranscript.isEmpty || !viewModel.liveAssistantText.isEmpty || viewModel.isUserSpeaking {
                         activeStreamingCard
                             .id("active-turn")
                     }
@@ -203,6 +203,11 @@ struct VoiceAssistantView: View {
 
     private var activeStreamingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if viewModel.isUserSpeaking && viewModel.liveUserTranscript.isEmpty {
+                Label("Listening to your voice (16 kHz)...", systemImage: "waveform")
+                    .font(.subheadline)
+                    .foregroundStyle(.mint)
+            }
             if !viewModel.liveUserTranscript.isEmpty {
                 Label(viewModel.liveUserTranscript, systemImage: "waveform")
                     .font(.subheadline)
