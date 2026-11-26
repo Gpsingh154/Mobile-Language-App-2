@@ -905,14 +905,14 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
         )
         var vadConfig = sherpaOnnxVadModelConfig(
             sileroVad: sileroConfig,
-            sampleRate: config.sampleRate,
+            sampleRate: Int(config.sampleRate),
             numThreads: 1,
             provider: "cpu",
             debug: 0
         )
         self.vad = SherpaOnnxVoiceActivityDetectorWrapper(
             config: &vadConfig,
-            bufferSizeInSeconds: config.maxUtteranceSeconds
+            buffer_size_in_seconds: Float(config.maxUtteranceSeconds)
         )
 
         // 2. Configure IndicConformer INT8 ONNX via NeMo EncDec CTC config
@@ -921,12 +921,12 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
         )
         let offlineModelConfig = sherpaOnnxOfflineModelConfig(
             tokens: config.tokensPath,
-            numThreads: config.numThreads,
+            nemoCtc: nemoCtcConfig,
+            numThreads: Int(config.numThreads),
             provider: config.provider,
-            debug: 0,
-            nemoCtc: nemoCtcConfig
+            debug: 0
         )
-        let featConfig = sherpaOnnxFeatureConfig(sampleRate: config.sampleRate, featureDim: 80)
+        let featConfig = sherpaOnnxFeatureConfig(sampleRate: Int(config.sampleRate), featureDim: 80)
         var recognizerConfig = sherpaOnnxOfflineRecognizerConfig(
             featConfig: featConfig,
             modelConfig: offlineModelConfig,
@@ -967,19 +967,16 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
             isCurrentlyInSpeech = false
 
             guard !samples.isEmpty else { continue }
-            let maxSamples = Int(Float(config.sampleRate) * config.maxUtteranceSeconds)
+            let maxSamples = Int(Float(config.sampleRate) * Float(config.maxUtteranceSeconds))
             let boundedSamples = samples.count > maxSamples ? Array(samples.prefix(maxSamples)) : samples
 
-            if let stream = SherpaOnnxOfflineStream(recognizer: recognizer) {
-                let decodeStart = CFAbsoluteTimeGetCurrent()
-                stream.acceptWaveform(samples: boundedSamples, sampleRate: config.sampleRate)
-                recognizer.decode(stream)
-                let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1000.0
-                let text = stream.getResult().text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty {
-                    let duration = Double(boundedSamples.count) / Double(config.sampleRate)
-                    events.append(.utteranceFinalized(transcript: text, durationSeconds: duration, decodeMs: decodeMs))
-                }
+            let decodeStart = CFAbsoluteTimeGetCurrent()
+            let result = recognizer.decode(samples: boundedSamples, sampleRate: Int(config.sampleRate))
+            let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1000.0
+            let text = result.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            if !text.isEmpty {
+                let duration = Double(boundedSamples.count) / Double(config.sampleRate)
+                events.append(.utteranceFinalized(transcript: text, durationSeconds: duration, decodeMs: decodeMs))
             }
         }
         #else
@@ -1161,8 +1158,8 @@ public actor LiteRTLMGemmaBrain: LLMBrainProtocol {
         }
         let samplerConfig = try SamplerConfig(
             topK: config.topK,
-            topP: config.topP,
-            temperature: config.temperature
+            topP: Float(config.topP),
+            temperature: Float(config.temperature)
         )
         let conversationConfig = ConversationConfig(
             systemMessage: Message(config.systemPrompt),
@@ -1331,7 +1328,7 @@ public final class KokoroVoicePack: @unchecked Sendable {
         let clampedIndex = min(max(0, tokenCount), frameCount - 1)
         let offset = clampedIndex * frameByteStride
         var vector = [Float](repeating: 0, count: styleDim)
-        vector.withUnsafeMutableBytes { dst in
+        _ = vector.withUnsafeMutableBytes { dst in
             mappedData.copyBytes(to: dst, from: offset..<(offset + frameByteStride))
         }
         return vector
