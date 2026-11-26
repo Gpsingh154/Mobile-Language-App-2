@@ -910,8 +910,8 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
     private var isCurrentlyInSpeech: Bool = false
 
     #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
-    private var recognizerPtr: OpaquePointer?
-    private var vadPtr: OpaquePointer?
+    private var recognizer: SherpaOnnxOfflineRecognizer?
+    private var vad: SherpaOnnxVoiceActivityDetectorWrapper?
     #else
     // Structural simulation accumulators when SherpaOnnx XCFramework is not yet linked.
     private var mockAccumulatedFrames: Int = 0
@@ -947,13 +947,10 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
             provider: "cpu",
             debug: 0
         )
-        let createdVad = withUnsafePointer(to: vadConfig) { ptr in
-            SherpaOnnxCreateVoiceActivityDetector(ptr, Float(config.maxUtteranceSeconds))
-        }
-        guard let createdVad else {
-            throw VoicePipelineError.engineNotInitialized("Silero VAD failed to load (\(config.sileroVadModelPath))")
-        }
-        self.vadPtr = createdVad
+        self.vad = SherpaOnnxVoiceActivityDetectorWrapper(
+            config: &vadConfig,
+            buffer_size_in_seconds: Float(config.maxUtteranceSeconds)
+        )
 
         // 2. Configure IndicConformer INT8 ONNX via NeMo EncDec CTC config
         let nemoCtcConfig = sherpaOnnxOfflineNemoEncDecCtcModelConfig(
@@ -973,15 +970,7 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
             decodingMethod: "greedy_search",
             maxActivePaths: 4
         )
-        let createdRec = withUnsafePointer(to: recognizerConfig) { ptr in
-            SherpaOnnxCreateOfflineRecognizer(ptr)
-        }
-        guard let createdRec else {
-            SherpaOnnxDestroyVoiceActivityDetector(createdVad)
-            self.vadPtr = nil
-            throw VoicePipelineError.engineNotInitialized("IndicConformer ASR failed to load (\(config.indicConformerModelPath))")
-        }
-        self.recognizerPtr = createdRec
+        self.recognizer = SherpaOnnxOfflineRecognizer(config: &recognizerConfig)
         #else
         logger.info("Initialized structural mock SherpaIndicConformerASR (link SherpaOnnx XCFramework for live inference).")
         #endif
@@ -999,48 +988,32 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
         var events: [ASREvent] = []
 
         #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
-        guard let vadPtr, let recognizerPtr else { return events }
-        floatScratchBuffer.withUnsafeBufferPointer { buf in
-            SherpaOnnxVoiceActivityDetectorAcceptWaveform(vadPtr, buf.baseAddress, Int32(buf.count))
-        }
+        guard let vad, let recognizer else { return events }
+        vad.acceptWaveform(samples: floatScratchBuffer)
 
-        let speechNow = (SherpaOnnxVoiceActivityDetectorDetected(vadPtr) == 1)
+        let speechNow = vad.isSpeechDetected()
         if speechNow && !isCurrentlyInSpeech {
             isCurrentlyInSpeech = true
             events.append(.speechStarted)
         }
 
-        while SherpaOnnxVoiceActivityDetectorEmpty(vadPtr) == 0 {
-            if let segPtr = SherpaOnnxVoiceActivityDetectorFront(vadPtr) {
-                let segment = SherpaOnnxSpeechSegmentWrapper(p: segPtr)
-                let samples = segment.samples
-                SherpaOnnxVoiceActivityDetectorPop(vadPtr)
-                isCurrentlyInSpeech = false
+        while !vad.isEmpty() {
+            let segment = vad.front()
+            let samples = segment.samples
+            vad.pop()
+            isCurrentlyInSpeech = false
 
-                guard !samples.isEmpty else { continue }
-                let maxSamples = Int(Float(config.sampleRate) * Float(config.maxUtteranceSeconds))
-                let boundedSamples = samples.count > maxSamples ? Array(samples.prefix(maxSamples)) : samples
+            guard !samples.isEmpty else { continue }
+            let maxSamples = Int(Float(config.sampleRate) * Float(config.maxUtteranceSeconds))
+            let boundedSamples = samples.count > maxSamples ? Array(samples.prefix(maxSamples)) : samples
 
-                let decodeStart = CFAbsoluteTimeGetCurrent()
-                if let stream = SherpaOnnxCreateOfflineStream(recognizerPtr) {
-                    boundedSamples.withUnsafeBufferPointer { sbuf in
-                        SherpaOnnxAcceptWaveformOffline(stream, Int32(config.sampleRate), sbuf.baseAddress, Int32(sbuf.count))
-                    }
-                    SherpaOnnxDecodeOfflineStream(recognizerPtr, stream)
-                    var text = ""
-                    if let resPtr = SherpaOnnxGetOfflineStreamResult(stream) {
-                        text = SherpaOnnxOfflineRecognitionResult(result: resPtr).text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-                    }
-                    SherpaOnnxDestroyOfflineStream(stream)
-                    let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1000.0
-                    if !text.isEmpty {
-                        let duration = Double(boundedSamples.count) / Double(config.sampleRate)
-                        events.append(.utteranceFinalized(transcript: text, durationSeconds: duration, decodeMs: decodeMs))
-                    }
-                }
-            } else {
-                SherpaOnnxVoiceActivityDetectorPop(vadPtr)
-                isCurrentlyInSpeech = false
+            let decodeStart = CFAbsoluteTimeGetCurrent()
+            let result = recognizer.decode(samples: boundedSamples, sampleRate: Int(config.sampleRate))
+            let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1000.0
+            let text = result.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            if !text.isEmpty {
+                let duration = Double(boundedSamples.count) / Double(config.sampleRate)
+                events.append(.utteranceFinalized(transcript: text, durationSeconds: duration, decodeMs: decodeMs))
             }
         }
         #else
@@ -1080,7 +1053,7 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
     public func resetVAD() {
         isCurrentlyInSpeech = false
         #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
-        if let vadPtr { SherpaOnnxVoiceActivityDetectorClear(vadPtr) }
+        vad?.clear()
         #else
         mockAccumulatedFrames = 0
         mockSilenceFrames = 0
@@ -1089,10 +1062,8 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
 
     public func unloadModel() async {
         #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
-        if let recognizerPtr { SherpaOnnxDestroyOfflineRecognizer(recognizerPtr) }
-        if let vadPtr { SherpaOnnxDestroyVoiceActivityDetector(vadPtr) }
-        recognizerPtr = nil
-        vadPtr = nil
+        recognizer = nil
+        vad = nil
         #endif
         floatScratchBuffer.removeAll(keepingCapacity: false)
         isCurrentlyInSpeech = false
