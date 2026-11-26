@@ -10,13 +10,9 @@ packages:
   LiteRTLM:
     url: https://github.com/google-ai-edge/LiteRT-LM
     branch: main
-  OnnxRuntime:
-    url: https://github.com/microsoft/onnxruntime-swift-package-manager
-    from: "1.18.0"
-  # Note: `k2-fsa/sherpa-onnx` bundles `csukuangfj/onnxruntime-libs`.
-  # If linking `sherpa-onnx` via SPM or XCFramework alongside `OnnxRuntime`,
-  # deduplicate to a single `onnxruntime.xcframework` or enable SherpaOnnx-only ORT linkage
-  # to avoid duplicate `OrtGetApiBase` symbols at link time.
+  SherpaOnnx:
+    url: https://github.com/k2-fsa/sherpa-onnx
+    branch: master
 
 targets:
   OfflineIndicVoiceAI:
@@ -28,6 +24,7 @@ targets:
         excludes:
           - "Resources/Info.plist"
           - "Resources/OfflineIndicVoiceAI.entitlements"
+          - "Resources/OfflineIndicVoiceAI-PaidDev.entitlements"
     resources:
       - path: OfflineIndicVoiceAI/Resources/Assets.xcassets
     info:
@@ -50,7 +47,7 @@ targets:
     dependencies:
       - package: LiteRTLM
         product: LiteRTLM
-      - package: OnnxRuntime
-        product: onnxruntime
+      - package: SherpaOnnx
+        product: sherpa-onnx
       - sdk: AVFoundation.framework
       - sdk: Accelerate.framework
