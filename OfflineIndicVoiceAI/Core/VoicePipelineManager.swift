@@ -82,6 +82,7 @@ public struct VoicePipelineConfiguration: Sendable {
         public let minSilenceDurationSeconds: Float
         public let minSpeechDurationSeconds: Float
         public let maxUtteranceSeconds: Float
+        public let scriptDisplayMode: ScriptDisplayMode
 
         public init(
             indicConformerModelPath: String,
@@ -93,7 +94,8 @@ public struct VoicePipelineConfiguration: Sendable {
             vadThreshold: Float = 0.50,
             minSilenceDurationSeconds: Float = 0.45,
             minSpeechDurationSeconds: Float = 0.25,
-            maxUtteranceSeconds: Float = 15.0
+            maxUtteranceSeconds: Float = 15.0,
+            scriptDisplayMode: ScriptDisplayMode = .auto
         ) {
             self.indicConformerModelPath = indicConformerModelPath
             self.tokensPath = tokensPath
@@ -105,7 +107,14 @@ public struct VoicePipelineConfiguration: Sendable {
             self.minSilenceDurationSeconds = minSilenceDurationSeconds
             self.minSpeechDurationSeconds = minSpeechDurationSeconds
             self.maxUtteranceSeconds = maxUtteranceSeconds
+            self.scriptDisplayMode = scriptDisplayMode
         }
+    }
+
+    public enum ScriptDisplayMode: String, Sendable {
+        case auto
+        case punjabiGurmukhi
+        case nativeASR
     }
 
     public struct LLMConfig: Sendable {
@@ -562,6 +571,7 @@ public final class AudioPipelineIO: @unchecked Sendable {
             if audioEngine.isRunning {
                 audioEngine.stop()
             }
+            audioEngine.reset()
 
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .spokenAudio, options: [])
@@ -589,6 +599,7 @@ public final class AudioPipelineIO: @unchecked Sendable {
             if audioEngine.isRunning {
                 audioEngine.stop()
             }
+            audioEngine.reset()
 
             let session = AVAudioSession.sharedInstance()
             let mode: AVAudioSession.Mode = (routingMode == .fullDuplexVoiceChatAEC) ? .voiceChat : .spokenAudio
@@ -893,6 +904,82 @@ public enum ASREvent: Sendable {
     case utteranceFinalized(transcript: String, durationSeconds: Double, decodeMs: Double)
 }
 
+// MARK: - Punjabi Gurmukhi Script Normalizer
+
+/// Converts Devanagari-biased IndicConformer ASR output into authentic Gurmukhi (ਪੰਜਾਬੀ)
+/// when Punjabi vocabulary is detected (in `.auto` mode) or when `.punjabiGurmukhi` is selected,
+/// while preserving Hindi, Tamil, Bengali, Gujarati, or English text untouched.
+public enum IndicScriptNormalizer {
+    private static let punjabiMarkers: [String] = [
+        "मैनू", "मैनूं", "तैनू", "तैनूं", "तुसी", "तुसीं", "असीं", "साडा", "साडी", "साडे",
+        "तुहाडा", "तुहाडी", "तुहाडे", "किवें", "किद्दां", "की हाल", "वदिया", "वधिया",
+        "चंगा", "चंगी", "गल्लां", "गल", "सत श्री", "अकाल", "पंजाब", "करदा", "करदी",
+        "होंदा", "होंदी", "नूं", "आं", "दां", "दियां", "वेख", "सुण", "दस", "दसो", "पाजी",
+        "हाँजी", "हांजी", "आ गया", "समझ आ", "की कर", "कित्थे", "किधर", "होवे"
+    ]
+
+    private static let multiCharMap: [(String, String)] = [
+        ("क़", "ਕ"), ("ख़", "ਖ਼"), ("ग़", "ਗ਼"), ("ज़", "ਜ਼"), ("ड़", "ੜ"), ("ढ़", "ੜ੍ਹ"), ("फ़", "ਫ਼"),
+        ("क्ष", "ਕਸ਼"), ("त्र", "ਤ੍ਰ"), ("ज्ञ", "ਗ੍ਯ"), ("श्र", "ਸ਼੍ਰ")
+    ]
+
+    private static let charMap: [Character: String] = [
+        "अ": "ਅ", "आ": "ਆ", "इ": "ਇ", "ई": "ਈ", "उ": "ਉ", "ऊ": "ਊ",
+        "ए": "ਏ", "ऐ": "ਐ", "ओ": "ਓ", "औ": "ਔ", "ऋ": "ਰਿ",
+        "क": "ਕ", "ख": "ਖ", "ग": "ਗ", "घ": "ਘ", "ङ": "ਙ",
+        "च": "ਚ", "छ": "ਛ", "ज": "ਜ", "झ": "ਝ", "ञ": "ਞ",
+        "ट": "ਟ", "ठ": "ਠ", "ड": "ਡ", "ढ": "ਢ", "ण": "ਣ",
+        "त": "ਤ", "थ": "ਥ", "द": "ਦ", "ध": "ਧ", "न": "ਨ",
+        "प": "ਪ", "फ": "ਫ", "ब": "ਬ", "भ": "ਭ", "म": "ਮ",
+        "य": "ਯ", "र": "ਰ", "ल": "ਲ", "ळ": "ਲ਼", "व": "ਵ",
+        "श": "ਸ਼", "ष": "ਸ਼", "स": "ਸ", "ह": "ਹ",
+        "ा": "ਾ", "ि": "ਿ", "ी": "ੀ", "ु": "ੁ", "ू": "ੂ",
+        "े": "ੇ", "ै": "ੈ", "ो": "ੋ", "ौ": "ਔ".replacingOccurrences(of: "ਔ", with: "ੌ"),
+        "ं": "ੰ", "ँ": "ਂ", "ः": "ਃ", "्": "੍", "़": "",
+        "।": "।", "॥": "॥",
+        "०": "੦", "१": "੧", "२": "੨", "३": "੩", "४": "੪",
+        "५": "੫", "६": "੬", "७": "੭", "८": "੮", "९": "੯"
+    ]
+
+    public static func normalize(_ text: String, mode: VoicePipelineConfiguration.ScriptDisplayMode) -> String {
+        guard mode != .nativeASR else { return text }
+        let containsDevanagari = text.unicodeScalars.contains { $0.value >= 0x0900 && $0.value <= 0x097F }
+        guard containsDevanagari else { return text }
+
+        if mode == .auto {
+            let isPunjabi = punjabiMarkers.contains { text.contains($0) }
+            guard isPunjabi else { return text }
+        }
+
+        var working = text
+        for (src, dst) in multiCharMap {
+            working = working.replacingOccurrences(of: src, with: dst)
+        }
+
+        var out = String()
+        out.reserveCapacity(working.count)
+        for ch in working {
+            if let mapped = charMap[ch] {
+                out.append(mapped)
+            } else {
+                out.append(ch)
+            }
+        }
+
+        // Common Gurmukhi nasal/spelling polish
+        let polish: [(String, String)] = [
+            ("ਮੈਨੂ ", "ਮੈਨੂੰ "), ("ਮੈਨੂ", "ਮੈਨੂੰ"),
+            ("ਤੈਨੂ ", "ਤੈਨੂੰ "), ("ਤੁਸੀ ", "ਤੁਸੀਂ "), ("ਅਸੀ ", "ਅਸੀਂ "),
+            ("ਨਹੀ ", "ਨਹੀਂ "), ("ਹਾਂ ਜੀ", "ਹਾਂਜੀ"), ("ਸਤਿ ਸ੍ਰੀ", "ਸਤਿ ਸ੍ਰੀ"),
+            ("ਸਤ ਸ੍ਰੀ", "ਸਤਿ ਸ੍ਰੀ")
+        ]
+        for (k, v) in polish {
+            out = out.replacingOccurrences(of: k, with: v)
+        }
+        return out
+    }
+}
+
 public protocol ASREngineProtocol: Actor {
     var isLoaded: Bool { get }
     func initialize() async throws
@@ -1012,8 +1099,9 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
             let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1000.0
             let text = result.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             if !text.isEmpty {
+                let normalizedText = IndicScriptNormalizer.normalize(text, mode: config.scriptDisplayMode)
                 let duration = Double(boundedSamples.count) / Double(config.sampleRate)
-                events.append(.utteranceFinalized(transcript: text, durationSeconds: duration, decodeMs: decodeMs))
+                events.append(.utteranceFinalized(transcript: normalizedText, durationSeconds: duration, decodeMs: decodeMs))
             }
         }
         #else
@@ -1819,16 +1907,16 @@ public final class VoicePipelineManager: ObservableObject {
                 await asrEngine.unloadModel()
             }
 
-            // Generate text via Gemma 4 only if free Jetsam headroom comfortably exceeds model file size + 650 MB overhead
+            // Generate text via Gemma 4 (if already loaded, reuse directly; if unloaded, check >= 1000 MB mmap headroom)
             var responseTokens: [String] = []
-            let modelAttrs = try? FileManager.default.attributesOfItem(atPath: config.llm.modelPath)
-            let modelBytes = (modelAttrs?[.size] as? NSNumber)?.intValue ?? 0
-            let modelMB = modelBytes / (1024 * 1024)
-            let requiredHeadroomMB = max(1800, modelMB + 650)
+            let llmAlreadyLoaded = await llmBrain.isLoaded
+            let hasHeadroom = llmAlreadyLoaded || (MemoryBudgetManager.availableMemoryMB() >= 1000)
 
-            if MemoryBudgetManager.availableMemoryMB() >= requiredHeadroomMB {
+            if hasHeadroom {
                 do {
-                    try await llmBrain.loadEngine()
+                    if !llmAlreadyLoaded {
+                        try await llmBrain.loadEngine()
+                    }
                     let stream = await llmBrain.streamResponse(for: nativeInput)
                     for try await token in stream {
                         if firstTokenTime == nil { firstTokenTime = CFAbsoluteTimeGetCurrent() }
@@ -1839,7 +1927,7 @@ public final class VoicePipelineManager: ObservableObject {
                     logger.warning("Gemma 4 sample turn fallback: \(error.localizedDescription)")
                 }
             } else {
-                logger.info("Skipping Gemma 4 (\(modelMB) MB) in sample turn due to Jetsam headroom (\(MemoryBudgetManager.availableMemoryMB()) MB < \(requiredHeadroomMB) MB).")
+                logger.info("Skipping Gemma 4 in sample turn due to low Jetsam headroom (\(MemoryBudgetManager.availableMemoryMB()) MB).")
             }
 
             if responseTokens.isEmpty {
@@ -1947,42 +2035,47 @@ public final class VoicePipelineManager: ObservableObject {
             self.transition(to: .thinking)
 
             do {
-                // Free ASR + TTS before Gemma 4 under adaptive/strict low-memory policies
-                // so the 2.59 GB model gets full Jetsam headroom.
+                // Free ASR + TTS before initial Gemma 4 load under adaptive/strict low-memory policies.
+                let llmAlreadyLoaded = await self.llmBrain.isLoaded
                 if self.config.residencyPolicy != .alwaysResident {
                     await self.asrEngine.unloadModel()
-                    await self.ttsEngine.unloadSession()
+                    if !llmAlreadyLoaded {
+                        await self.ttsEngine.unloadSession()
+                    }
                 }
 
-                let llmAttrs = try? FileManager.default.attributesOfItem(atPath: self.config.llm.modelPath)
-                let llmBytes = (llmAttrs?[.size] as? NSNumber)?.intValue ?? 0
-                let llmMB = llmBytes / (1024 * 1024)
-                let minSafeHeadroom = max(1200, llmMB + 250)
-                let canLoadGemma = (MemoryBudgetManager.availableMemoryMB() >= minSafeHeadroom)
+                // LiteRT-LM uses mmap so dirty footprint is ~600-800 MB; if already loaded, always reuse it!
+                let canUseGemma = llmAlreadyLoaded || (MemoryBudgetManager.availableMemoryMB() >= 1000)
 
                 var generatedClauses: [String] = []
-                if canLoadGemma {
-                    let tokenStream = await self.llmBrain.streamResponse(for: transcript)
-                    var chunker = TransliterationStreamChunker()
-                    for try await token in tokenStream {
-                        try Task.checkCancellation()
-                        firstTokenTimeBox.withLock { value in
-                            if value == nil { value = CFAbsoluteTimeGetCurrent() }
+                if canUseGemma {
+                    do {
+                        let tokenStream = await self.llmBrain.streamResponse(for: transcript)
+                        var chunker = TransliterationStreamChunker()
+                        for try await token in tokenStream {
+                            try Task.checkCancellation()
+                            firstTokenTimeBox.withLock { value in
+                                if value == nil { value = CFAbsoluteTimeGetCurrent() }
+                            }
+                            await MainActor.run {
+                                self.streamingResponseText.append(token)
+                                self.events.send(.llmTokenReceived(token))
+                            }
+                            generatedClauses.append(contentsOf: chunker.append(token: token))
                         }
-                        await MainActor.run {
-                            self.streamingResponseText.append(token)
-                            self.events.send(.llmTokenReceived(token))
+                        if let tail = chunker.flush() {
+                            generatedClauses.append(tail)
                         }
-                        generatedClauses.append(contentsOf: chunker.append(token: token))
+                        if self.config.residencyPolicy != .alwaysResident,
+                           MemoryBudgetManager.availableMemoryMB() < 550 {
+                            await self.llmBrain.unloadEngine()
+                        }
+                    } catch {
+                        self.logger.error("Gemma 4 turn failed: \(error.localizedDescription)")
                     }
-                    if let tail = chunker.flush() {
-                        generatedClauses.append(tail)
-                    }
-                    if self.config.residencyPolicy != .alwaysResident,
-                       MemoryBudgetManager.availableMemoryMB() < 550 {
-                        await self.llmBrain.unloadEngine()
-                    }
-                } else {
+                }
+
+                if generatedClauses.isEmpty && self.streamingResponseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let fallback = self.buildCompactLocalFallback(for: transcript)
                     firstTokenTimeBox.withLock { $0 = CFAbsoluteTimeGetCurrent() }
                     await MainActor.run {

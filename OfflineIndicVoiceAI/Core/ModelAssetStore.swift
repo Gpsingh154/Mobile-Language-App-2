@@ -108,6 +108,9 @@ public final class ModelAssetStore: NSObject, ObservableObject {
     @Published public var selectedVoiceID: String {
         didSet { UserDefaults.standard.set(selectedVoiceID, forKey: Keys.voiceID) }
     }
+    @Published public var scriptDisplayModeRaw: String {
+        didSet { UserDefaults.standard.set(scriptDisplayModeRaw, forKey: Keys.scriptMode) }
+    }
 
     private enum Keys {
         static let routingMode = "offlineindic.routingMode"
@@ -115,6 +118,7 @@ public final class ModelAssetStore: NSObject, ObservableObject {
         static let ttsSpeed = "offlineindic.ttsSpeed"
         static let kokoroCoreML = "offlineindic.kokoroCoreML"
         static let voiceID = "offlineindic.voiceID"
+        static let scriptMode = "offlineindic.scriptMode"
     }
 
     private let logger = Logger(subsystem: "com.offlineindic.voice", category: "ModelAssetStore")
@@ -138,6 +142,7 @@ public final class ModelAssetStore: NSObject, ObservableObject {
         self.ttsSpeed = savedSpeed > 0 ? savedSpeed : 1.0
         self.useCoreMLForKokoro = defaults.bool(forKey: Keys.kokoroCoreML)
         self.selectedVoiceID = defaults.string(forKey: Keys.voiceID) ?? "af_bella"
+        self.scriptDisplayModeRaw = defaults.string(forKey: Keys.scriptMode) ?? "auto"
 
         super.init()
         refreshStatuses()
@@ -156,6 +161,14 @@ public final class ModelAssetStore: NSObject, ObservableObject {
         case "always": return .alwaysResident
         case "strict": return .strictForegroundOnly
         default: return .adaptiveLowMemory
+        }
+    }
+
+    public var scriptDisplayMode: VoicePipelineConfiguration.ScriptDisplayMode {
+        switch scriptDisplayModeRaw {
+        case "pa": return .punjabiGurmukhi
+        case "native": return .nativeASR
+        default: return .auto
         }
     }
 
@@ -178,7 +191,8 @@ public final class ModelAssetStore: NSObject, ObservableObject {
         let asr = VoicePipelineConfiguration.ASRConfig(
             indicConformerModelPath: pathFor(.indicConformerONNX),
             tokensPath: pathFor(.indicConformerTokens),
-            sileroVadModelPath: pathFor(.sileroVAD)
+            sileroVadModelPath: pathFor(.sileroVAD),
+            scriptDisplayMode: scriptDisplayMode
         )
         let llm = VoicePipelineConfiguration.LLMConfig(
             modelPath: pathFor(.gemma4LiteRTLM)

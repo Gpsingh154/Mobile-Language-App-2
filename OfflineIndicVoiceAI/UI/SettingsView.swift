@@ -20,10 +20,15 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Audio Pipeline") {
+                Section("Audio & Language") {
                     Picker("Routing Mode", selection: $assetStore.audioRoutingModeRaw) {
                         Text("Full-Duplex AEC (Barge-In)").tag("fullDuplex")
                         Text("Half-Duplex Gated (Clean TTS)").tag("halfDuplex")
+                    }
+                    Picker("Transcript Script", selection: $assetStore.scriptDisplayModeRaw) {
+                        Text("Auto-Detect Punjabi (ਗੁਰਮੁਖੀ)").tag("auto")
+                        Text("Always Punjabi (ਗੁਰਮੁਖੀ)").tag("pa")
+                        Text("Raw ASR (Hindi / Indic / English)").tag("native")
                     }
                 }
 
