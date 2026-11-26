@@ -1,0 +1,22 @@
+# Xcode & Build Artifacts
+*.xcodeproj/
+*.xcworkspace/
+build/
+DerivedData/
+Payload/
+*.ipa
+*.xcarchive
+*.dSYM.zip
+*.dSYM
+
+# Multi-GB Offline AI Weights (transfer via iTunes / iCloud / In-App Downloader)
+*.onnx
+*.litertlm
+*.task
+*.bin
+StagedModelsForITunes/
+
+# OS & Editor Noise
+.DS_Store
+Thumbs.db
+.swiftpm/

@@ -1,0 +1,56 @@
+name: OfflineIndicVoiceAI
+options:
+  bundleIdPrefix: com.offlineindic
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  LiteRTLM:
+    url: https://github.com/google-ai-edge/LiteRT-LM
+    branch: main
+  OnnxRuntime:
+    url: https://github.com/microsoft/onnxruntime-swift-package-manager
+    from: "1.18.0"
+  # Note: `k2-fsa/sherpa-onnx` bundles `csukuangfj/onnxruntime-libs`.
+  # If linking `sherpa-onnx` via SPM or XCFramework alongside `OnnxRuntime`,
+  # deduplicate to a single `onnxruntime.xcframework` or enable SherpaOnnx-only ORT linkage
+  # to avoid duplicate `OrtGetApiBase` symbols at link time.
+
+targets:
+  OfflineIndicVoiceAI:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: OfflineIndicVoiceAI
+        excludes:
+          - "Resources/Info.plist"
+          - "Resources/OfflineIndicVoiceAI.entitlements"
+    resources:
+      - path: OfflineIndicVoiceAI/Resources/Assets.xcassets
+    info:
+      path: OfflineIndicVoiceAI/Resources/Info.plist
+    entitlements:
+      path: OfflineIndicVoiceAI/Resources/OfflineIndicVoiceAI.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.offlineindic.voiceai
+        PRODUCT_NAME: VaaniLocal
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: targeted
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+    dependencies:
+      - package: LiteRTLM
+        product: LiteRTLM
+      - package: OnnxRuntime
+        product: onnxruntime
+      - sdk: AVFoundation.framework
+      - sdk: Accelerate.framework
