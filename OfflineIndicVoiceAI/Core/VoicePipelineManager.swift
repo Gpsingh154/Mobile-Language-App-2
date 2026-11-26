@@ -905,7 +905,7 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
         )
         var vadConfig = sherpaOnnxVadModelConfig(
             sileroVad: sileroConfig,
-            sampleRate: Int(config.sampleRate),
+            sampleRate: Int32(config.sampleRate),
             numThreads: 1,
             provider: "cpu",
             debug: 0
