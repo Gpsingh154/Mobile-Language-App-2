@@ -640,8 +640,8 @@ private final class LockedBox<Value>: @unchecked Sendable {
 public final class AudioPipelineIO: @unchecked Sendable {
     private let logger = Logger(subsystem: "com.offlineindic.voice", category: "AudioPipelineIO")
 
-    private let audioEngine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
+    private var audioEngine = AVAudioEngine()
+    private var playerNode = AVAudioPlayerNode()
     private let graphQueue = DispatchQueue(label: "com.offlineindic.voice.audiograph")
 
     private var converter: AVAudioConverter?
@@ -718,29 +718,45 @@ public final class AudioPipelineIO: @unchecked Sendable {
         }
     }
 
+    private func resetEngineAndDeactivateSessionLocked() {
+        if isTapInstalled {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            isTapInstalled = false
+        }
+        playerNode.stop()
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        audioEngine.reset()
+        audioEngine = AVAudioEngine()
+        playerNode = AVAudioPlayerNode()
+        converter = nil
+
+        let session = AVAudioSession.sharedInstance()
+        try? session.setPreferredSampleRate(0)
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
     public func configureForPlaybackOnly() throws {
         try graphQueue.sync {
-            if isTapInstalled {
-                audioEngine.inputNode.removeTap(onBus: 0)
-                isTapInstalled = false
-            }
-            if audioEngine.isRunning {
-                audioEngine.stop()
-            }
-            audioEngine.reset()
+            resetEngineAndDeactivateSessionLocked()
 
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [])
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-
-            if !audioEngine.attachedNodes.contains(playerNode) {
-                audioEngine.attach(playerNode)
-                audioEngine.connect(
-                    playerNode,
-                    to: audioEngine.mainMixerNode,
-                    format: playbackFormat24kFloatMono
-                )
+            do {
+                try session.setCategory(.playback, mode: .spokenAudio, options: [])
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+            } catch {
+                // Fallback to playAndRecord defaultToSpeaker if hardware refuses direct .playback switch
+                try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetooth])
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
             }
+
+            audioEngine.attach(playerNode)
+            audioEngine.connect(
+                playerNode,
+                to: audioEngine.mainMixerNode,
+                format: playbackFormat24kFloatMono
+            )
             audioEngine.prepare()
             try audioEngine.start()
         }
@@ -748,14 +764,7 @@ public final class AudioPipelineIO: @unchecked Sendable {
 
     public func configureAndStart() throws {
         try graphQueue.sync {
-            if isTapInstalled {
-                audioEngine.inputNode.removeTap(onBus: 0)
-                isTapInstalled = false
-            }
-            if audioEngine.isRunning {
-                audioEngine.stop()
-            }
-            audioEngine.reset()
+            resetEngineAndDeactivateSessionLocked()
 
             let session = AVAudioSession.sharedInstance()
             let mode: AVAudioSession.Mode = (routingMode == .fullDuplexVoiceChatAEC) ? .voiceChat : .spokenAudio
@@ -780,14 +789,7 @@ public final class AudioPipelineIO: @unchecked Sendable {
 
     public func stop() {
         graphQueue.sync {
-            if isTapInstalled {
-                audioEngine.inputNode.removeTap(onBus: 0)
-                isTapInstalled = false
-            }
-            playerNode.stop()
-            if audioEngine.isRunning {
-                audioEngine.stop()
-            }
+            resetEngineAndDeactivateSessionLocked()
             ringBuffer.clear()
         }
         resumeAllPlaybackWaiters()
@@ -2331,6 +2333,9 @@ public final class VoicePipelineManager: ObservableObject {
         var firstAudioTime: CFAbsoluteTime?
 
         do {
+            if state == .listening || state == .speaking || state == .thinking {
+                await stopPipeline()
+            }
             try audioIO.configureForPlaybackOnly()
 
             if config.residencyPolicy != .alwaysResident {
@@ -2402,9 +2407,69 @@ public final class VoicePipelineManager: ObservableObject {
             events.send(.turnCompleted(metrics))
             transition(to: .uninitialized)
         } catch {
+            audioIO.stop()
             logger.error("Sample turn failed: \(error.localizedDescription)")
             transition(to: .error(error.localizedDescription))
         }
+    }
+
+    /// Replays a previously generated response aloud via Kokoro TTS so the user can listen and practice speaking.
+    public func replayResponse(_ displayText: String) async {
+        let trimmed = displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let previousState = state
+        let speakSource = Self.extractSpeakableFromDisplay(trimmed)
+        guard !speakSource.isEmpty else { return }
+
+        do {
+            if state == .listening {
+                await stopPipeline()
+            }
+            try audioIO.configureForPlaybackOnly()
+            try await ttsEngine.loadSession()
+
+            transition(to: .speaking)
+            var chunker = TransliterationStreamChunker()
+            var clauses = chunker.append(token: speakSource)
+            if let tail = chunker.flush() { clauses.append(tail) }
+            if clauses.isEmpty { clauses = [speakSource] }
+
+            for clause in clauses {
+                let samples24k = try await ttsEngine.synthesize(
+                    phoneticClause: clause,
+                    speed: config.tts.speed
+                )
+                await audioIO.enqueuePlayback(samples24k: samples24k, maxQueuedBuffers: 2)
+            }
+            await audioIO.waitForPlaybackDrain()
+            audioIO.stop()
+
+            if previousState == .listening {
+                await startPipeline()
+            } else {
+                transition(to: .uninitialized)
+            }
+        } catch {
+            audioIO.stop()
+            logger.error("Replay failed: \(error.localizedDescription)")
+            transition(to: .error(error.localizedDescription))
+        }
+    }
+
+    private static func extractSpeakableFromDisplay(_ displayText: String) -> String {
+        let lines = displayText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if lines.count >= 2, let last = lines.last, last.hasPrefix("("), last.hasSuffix(")") {
+            let inner = String(last.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !inner.isEmpty {
+                return IndicScriptNormalizer.toPhoneticLatin(inner)
+            }
+        }
+        return IndicScriptNormalizer.toPhoneticLatin(displayText)
     }
 
     /// Supports user barge-in or manual cancellation: stops current LLM generation

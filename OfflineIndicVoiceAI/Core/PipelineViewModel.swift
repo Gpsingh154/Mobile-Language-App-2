@@ -41,6 +41,7 @@ public final class PipelineViewModel: ObservableObject {
     @Published public private(set) var history: [ConversationTurn] = []
     @Published public private(set) var availableMemoryMB: Int = MemoryBudgetManager.availableMemoryMB()
     @Published public private(set) var lastMetrics: TurnLatencyMetrics?
+    @Published public private(set) var replayingTurnID: UUID?
     @Published public var bannerErrorMessage: String?
 
     public let assetStore: ModelAssetStore
@@ -131,7 +132,7 @@ public final class PipelineViewModel: ObservableObject {
         lastMetrics = nil
     }
 
-    /// Triggers a sample 16 kHz Punjabi utterance and speaks the response through Kokoro TTS.
+    /// Triggers a sample utterance matching ANY selected (Input -> Output) language pair and mode, speaking it aloud via Kokoro TTS.
     public func runMockSampleTurn() {
         Haptics.tap()
         guard let manager else {
@@ -140,23 +141,66 @@ public final class PipelineViewModel: ObservableObject {
         }
         let inputLang = assetStore.inputLanguage
         let outputLang = assetStore.outputLanguage
-        let sampleInput: String
-        switch inputLang {
-        case .english: sampleInput = "Hello, how are you doing today?"
-        case .hindi: sampleInput = "नमस्ते, आज मौसम कैसा है?"
-        default: sampleInput = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਅੱਜ ਮੌਸਮ ਕਿਵੇਂ ਹੈ?"
-        }
-        let fallbackResp: String
-        switch outputLang {
-        case .english: fallbackResp = "Hello! I am doing great. The weather looks lovely today."
-        case .hindi: fallbackResp = "NATIVE: नमस्ते! मैं बिल्कुल ठीक हूँ। आज मौसम बहुत अच्छा है।\nSPEAK: Namaste! Main bilkul theek hoon. Aaj mausam bahut achha hai."
-        default: fallbackResp = "NATIVE: ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ਬਿਲਕੁਲ ਵਧੀਆ ਹਾਂ। ਅੱਜ ਮੌਸਮ ਬਹੁਤ ਸੋਹਣਾ ਹੈ।\nSPEAK: Sat sri akaal! Main bilkul vadiya aan. Aaj mausam bahut sohna hai."
-        }
+        let mode = assetStore.interactionMode
+
+        let sampleInput = Self.samplePhrase(for: inputLang)
+        let fallbackResp = Self.fallbackReply(for: outputLang, mode: mode)
+
         Task {
+            await manager.updateLanguageSettings(input: inputLang, output: outputLang, mode: mode)
             await manager.runSampleTurn(
                 nativeInput: sampleInput,
                 fallbackRomanResponse: fallbackResp
             )
+        }
+    }
+
+    public func replayTurn(_ turn: ConversationTurn) {
+        Haptics.tap()
+        guard let manager else { return }
+        replayingTurnID = turn.id
+        Task {
+            await manager.replayResponse(turn.assistantRomanisedText)
+            replayingTurnID = nil
+        }
+    }
+
+    private static func samplePhrase(for lang: PipelineLanguage) -> String {
+        switch lang {
+        case .auto, .punjabi: return "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਅੱਜ ਮੌਸਮ ਕਿਵੇਂ ਹੈ?"
+        case .hindi: return "नमस्ते, आज मौसम कैसा है?"
+        case .english: return "Hello, how is the weather today?"
+        case .bengali: return "নমস্কার, আজ আবহাওয়া কেমন?"
+        case .tamil: return "வணக்கம், இன்று வானிலை எப்படி உள்ளது?"
+        case .telugu: return "నమస్కారం, ఈ రోజు వాతావరణం ఎలా ఉంది?"
+        case .marathi: return "नमस्कार, आज हवामान कसे आहे?"
+        case .gujarati: return "નમસ્તે, આજે હવામાન કેવું છે?"
+        case .kannada: return "ನಮಸ್ಕಾರ, ಇಂದು ಹವಾಮಾನ ಹೇಗಿದೆ?"
+        }
+    }
+
+    private static func fallbackReply(for lang: PipelineLanguage, mode: AssistantInteractionMode) -> String {
+        switch (lang, mode) {
+        case (.english, .translate):
+            return "Hello, how is the weather today?"
+        case (.english, .smartAnswer):
+            return "Hello! I am doing great. The weather looks lovely today."
+        case (.punjabi, _), (.auto, _):
+            return "NATIVE: ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਅੱਜ ਮੌਸਮ ਕਿਵੇਂ ਹੈ?\nSPEAK: Sat sri akaal, ajj mausam kiven hai?"
+        case (.hindi, _):
+            return "NATIVE: नमस्ते, आज मौसम कैसा है?\nSPEAK: Namaste, aaj mausam kaisa hai?"
+        case (.bengali, _):
+            return "NATIVE: নমস্কার, আজ আবহাওয়া কেমন?\nSPEAK: Nomoshkar, aaj aabohaowa kemon?"
+        case (.tamil, _):
+            return "NATIVE: வணக்கம், இன்று வானிலை எப்படி உள்ளது?\nSPEAK: Vanakkam, indru vaanilai eppadi ulladhu?"
+        case (.telugu, _):
+            return "NATIVE: నమస్కారం, ఈ రోజు వాతావరణం ఎలా ఉంది?\nSPEAK: Namaskaram, ee roju vaataavaranam ela undi?"
+        case (.marathi, _):
+            return "NATIVE: नमस्कार, आज हवामान कसे आहे?\nSPEAK: Namaskar, aaj hawaamaan kase aahe?"
+        case (.gujarati, _):
+            return "NATIVE: નમસ્તે, આજે હવામાન કેવું છે?\nSPEAK: Namaste, aaje havaamaan kevu chhe?"
+        case (.kannada, _):
+            return "NATIVE: ನಮಸ್ಕಾರ, ಇಂದು ಹವಾಮಾನ ಹೇಗಿದೆ?\nSPEAK: Namaskara, indu havaamaana hegide?"
         }
     }
 

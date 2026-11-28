@@ -265,8 +265,15 @@ struct VoiceAssistantView: View {
                     }
 
                     ForEach(viewModel.history) { turn in
-                        TurnCardView(turn: turn)
-                            .id(turn.id)
+                        TurnCardView(
+                            turn: turn,
+                            isReplaying: viewModel.replayingTurnID == turn.id,
+                            isBusy: isActiveSession || viewModel.replayingTurnID != nil,
+                            onReplay: {
+                                viewModel.replayTurn(turn)
+                            }
+                        )
+                        .id(turn.id)
                     }
 
                     if !viewModel.liveUserTranscript.isEmpty || !viewModel.liveAssistantText.isEmpty || viewModel.isUserSpeaking {
@@ -331,13 +338,14 @@ struct VoiceAssistantView: View {
             Button {
                 viewModel.runMockSampleTurn()
             } label: {
-                Label("Test Sample Punjabi Turn", systemImage: "play.circle.fill")
+                Label("Test Sample (\(assetStore.inputLanguage.displayName) → \(assetStore.outputLanguage.displayName))", systemImage: "play.circle.fill")
                     .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
             .tint(.cyan)
-            .disabled(isActiveSession)
+            .disabled(isActiveSession || viewModel.replayingTurnID != nil)
 
             HStack(spacing: 18) {
                 Button {
@@ -483,14 +491,34 @@ private struct VoiceStateOrb: View {
 
 private struct TurnCardView: View {
     let turn: ConversationTurn
+    let isReplaying: Bool
+    let isBusy: Bool
+    let onReplay: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !turn.userNativeTranscript.isEmpty {
-                Text(turn.userNativeTranscript)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.cyan)
+            HStack(alignment: .top, spacing: 10) {
+                if !turn.userNativeTranscript.isEmpty {
+                    Text(turn.userNativeTranscript)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.cyan)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Spacer()
+                }
+
+                if !turn.assistantRomanisedText.isEmpty {
+                    Button(action: onReplay) {
+                        Image(systemName: isReplaying ? "speaker.wave.3.fill" : "play.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(isReplaying ? .mint : .cyan)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusy)
+                    .accessibilityLabel("Replay pronunciation")
+                }
             }
+
             Text(turn.assistantRomanisedText)
                 .font(.body)
                 .foregroundStyle(.white)
