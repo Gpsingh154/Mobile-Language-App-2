@@ -1049,19 +1049,54 @@ private struct TeacherSessionView: View {
                                 .background(Color.cyan.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
                             }
 
-                            // Teacher prompt in learner's language
+                            // Teacher prompt in English + user's first language
                             VStack(alignment: .leading, spacing: 6) {
-                                Label("AI Teacher", systemImage: "person.wave.2.fill")
-                                    .font(.caption.weight(.bold))
-                                    .foregroundStyle(Color.amberColor)
+                                HStack(spacing: 8) {
+                                    Label("AI Teacher", systemImage: "person.wave.2.fill")
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(Color.amberColor)
+                                    if viewModel.teacherIsSpeaking {
+                                        Text("Speaking...")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.cyan)
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 2)
+                                            .background(Color.cyan.opacity(0.16), in: Capsule())
+                                    }
+                                }
                                 Text(lesson.teacherPromptText)
                                     .font(.subheadline)
                                     .foregroundStyle(.white.opacity(0.95))
+                                if let secondary = lesson.teacherGuidanceSecondary, !secondary.isEmpty {
+                                    Text(secondary)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Color.amberColor.opacity(0.95))
+                                }
                             }
 
-                            // Target phrase box + Audio Listen controls
+                            // Bilingual Starter / Translation Box + Audio Listen controls
                             VStack(alignment: .leading, spacing: 10) {
-                                Text("LEARN & SPEAK IN \(targetLanguage.displayName.uppercased())")
+                                if !lesson.sourceNativeScript.isEmpty {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("IN YOUR LANGUAGE (\(knownLanguage.displayName.uppercased()))")
+                                            .font(.caption2.weight(.bold))
+                                            .foregroundStyle(Color.amberColor)
+                                        Text(lesson.sourceNativeScript)
+                                            .font(.headline.weight(.semibold))
+                                            .foregroundStyle(.white)
+                                        if knownLanguage != .english,
+                                           targetLanguage != .english,
+                                           !lesson.englishMeaning.isEmpty {
+                                            Text("Meaning: \(lesson.englishMeaning)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Divider()
+                                        .overlay(Color.white.opacity(0.18))
+                                }
+
+                                Text("TRANSLATION & SPEAK IN \(targetLanguage.displayName.uppercased())")
                                     .font(.caption2.weight(.bold))
                                     .foregroundStyle(.mint)
 
@@ -1194,6 +1229,7 @@ private struct TeacherSessionView: View {
 
                     HStack(spacing: 10) {
                         Button {
+                            viewModel.cancelTeacherSpeech()
                             showKnownKeyboardSheet = true
                         } label: {
                             Label("Type in \(knownLanguage.displayName)", systemImage: "keyboard")

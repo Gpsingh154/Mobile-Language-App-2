@@ -281,9 +281,30 @@ public enum TeacherTopic: String, CaseIterable, Identifiable, Sendable {
 
 public struct TeacherTurnResult: Equatable, Sendable {
     public let teacherPromptText: String
+    public let teacherGuidanceSecondary: String?
+    public let sourceNativeScript: String
+    public let englishMeaning: String
     public let targetNativeScript: String
     public let targetPhoneticSpeak: String
     public let grammarTip: String
+
+    public init(
+        teacherPromptText: String,
+        teacherGuidanceSecondary: String? = nil,
+        sourceNativeScript: String = "",
+        englishMeaning: String = "",
+        targetNativeScript: String,
+        targetPhoneticSpeak: String,
+        grammarTip: String
+    ) {
+        self.teacherPromptText = teacherPromptText
+        self.teacherGuidanceSecondary = teacherGuidanceSecondary
+        self.sourceNativeScript = sourceNativeScript
+        self.englishMeaning = englishMeaning
+        self.targetNativeScript = targetNativeScript
+        self.targetPhoneticSpeak = targetPhoneticSpeak
+        self.grammarTip = grammarTip
+    }
 }
 
 public struct TeacherPracticeEvaluation: Equatable, Sendable {
@@ -1227,12 +1248,13 @@ public enum IndicScriptNormalizer {
 
     private static let devaToGurmMulti: [(String, String)] = [
         ("क़", "ਕ"), ("ख़", "ਖ਼"), ("ग़", "ਗ਼"), ("ज़", "ਜ਼"), ("ड़", "ੜ"), ("ढ़", "ੜ੍ਹ"), ("फ़", "ਫ਼"),
-        ("क्ष", "ਕਸ਼"), ("त्र", "ਤ੍ਰ"), ("ज्ञ", "ਗ੍ਯ"), ("श्र", "ਸ਼੍ਰ")
+        ("क्ष", "ਕਸ਼"), ("त्र", "ਤਰ"), ("ज्ञ", "ਗਿ"), ("श्र", "ਸ਼ਰ")
     ]
 
     private static let devaToGurmChar: [Character: String] = [
         "अ": "ਅ", "आ": "ਆ", "इ": "ਇ", "ई": "ਈ", "उ": "ਉ", "ऊ": "ਊ",
         "ए": "ਏ", "ऐ": "ਐ", "ओ": "ਓ", "औ": "ਔ", "ऋ": "ਰਿ",
+        "ऑ": "ਔ", "ऍ": "ਐ", "ऎ": "ਏ", "ऒ": "ਓ", "ॐ": "ਓਮ", "ऽ": "",
         "क": "ਕ", "ख": "ਖ", "ग": "ਗ", "घ": "ਘ", "ङ": "ਙ",
         "च": "ਚ", "छ": "ਛ", "ज": "ਜ", "झ": "ਝ", "ञ": "ਞ",
         "ट": "ਟ", "ठ": "ਠ", "ड": "ਡ", "ढ": "ਢ", "ण": "ਣ",
@@ -1242,6 +1264,7 @@ public enum IndicScriptNormalizer {
         "श": "ਸ਼", "ष": "ਸ਼", "स": "ਸ", "ह": "ਹ",
         "ा": "ਾ", "ि": "ਿ", "ी": "ੀ", "ु": "ੁ", "ू": "ੂ",
         "े": "ੇ", "ै": "ੈ", "ो": "ੋ", "ौ": "ੌ",
+        "ृ": "ਰਿ", "ॄ": "ਰੀ", "ॅ": "ੈ", "ॉ": "ੌ", "ॆ": "ੇ", "ॊ": "ੋ",
         "ं": "ੰ", "ँ": "ਂ", "ः": "ਃ", "्": "੍", "़": "",
         "।": "।", "॥": "॥",
         "०": "੦", "१": "੧", "२": "੨", "३": "੩", "४": "੪",
@@ -1275,52 +1298,99 @@ public enum IndicScriptNormalizer {
     ) -> String {
         switch inputLanguage {
         case .punjabi:
-            return convertDevanagariToGurmukhi(text)
+            return stripStrayIndicScripts(convertDevanagariToGurmukhi(text), allowedRange: 0x0A00...0x0A7F)
         case .hindi, .marathi:
-            return convertGurmukhiToDevanagari(text)
+            return stripStrayIndicScripts(convertGurmukhiToDevanagari(text), allowedRange: 0x0900...0x097F)
+        case .bengali:
+            return stripStrayIndicScripts(text, allowedRange: 0x0980...0x09FF)
+        case .gujarati:
+            return stripStrayIndicScripts(text, allowedRange: 0x0A80...0x0AFF)
+        case .tamil:
+            return stripStrayIndicScripts(text, allowedRange: 0x0B80...0x0BFF)
+        case .telugu:
+            return stripStrayIndicScripts(text, allowedRange: 0x0C00...0x0C7F)
+        case .kannada:
+            return stripStrayIndicScripts(text, allowedRange: 0x0C80...0x0CFF)
         case .english:
-            let hasIndic = text.unicodeScalars.contains {
-                ($0.value >= 0x0900 && $0.value <= 0x097F) || ($0.value >= 0x0A00 && $0.value <= 0x0A7F)
-            }
+            let hasIndic = text.unicodeScalars.contains { (0x0900...0x0D7F).contains($0.value) }
             return hasIndic ? toPhoneticLatin(text) : text
         case .auto:
             guard legacyMode != .nativeASR else { return text }
             if legacyMode == .punjabiGurmukhi {
-                return convertDevanagariToGurmukhi(text)
+                return stripStrayIndicScripts(convertDevanagariToGurmukhi(text), allowedRange: 0x0A00...0x0A7F)
             }
             let hasGurmukhi = text.unicodeScalars.contains { $0.value >= 0x0A00 && $0.value <= 0x0A7F }
             let isPunjabi = hasGurmukhi || punjabiMarkers.contains { text.contains($0) }
             if isPunjabi {
-                return convertDevanagariToGurmukhi(text)
+                return stripStrayIndicScripts(convertDevanagariToGurmukhi(text), allowedRange: 0x0A00...0x0A7F)
             }
             return convertGurmukhiToDevanagari(text)
-        default:
-            return text
         }
+    }
+
+    private static func stripStrayIndicScripts(_ text: String, allowedRange: ClosedRange<UInt32>) -> String {
+        var scalars = String.UnicodeScalarView()
+        scalars.reserveCapacity(text.unicodeScalars.count)
+        for s in text.unicodeScalars {
+            if (0x0900...0x0D7F).contains(s.value) && !allowedRange.contains(s.value) {
+                continue
+            }
+            if s.value == 0x200C || s.value == 0x200D {
+                continue
+            }
+            scalars.append(s)
+        }
+        return String(scalars)
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public static func convertDevanagariToGurmukhi(_ text: String) -> String {
         let containsDeva = text.unicodeScalars.contains { $0.value >= 0x0900 && $0.value <= 0x097F }
-        guard containsDeva else { return text }
-
         var working = text
-        for (src, dst) in devaToGurmMulti {
-            working = working.replacingOccurrences(of: src, with: dst)
+        if containsDeva {
+            for (src, dst) in devaToGurmMulti {
+                working = working.replacingOccurrences(of: src, with: dst)
+            }
+            var out = String()
+            out.reserveCapacity(working.count)
+            for ch in working {
+                if let mapped = devaToGurmChar[ch] {
+                    out.append(mapped)
+                } else if let firstScalar = ch.unicodeScalars.first, (0x0900...0x097F).contains(firstScalar.value) {
+                    continue
+                } else {
+                    out.append(ch)
+                }
+            }
+            working = out
         }
-        var out = String()
-        out.reserveCapacity(working.count)
-        for ch in working {
-            out.append(devaToGurmChar[ch] ?? String(ch))
+
+        // Remove orphan Gurmukhi virama (U+0A4D) except valid pairin forms (੍ਰ, ੍ਹ, ੍ਵ) so iOS never draws broken dotted circles.
+        let chars = Array(working)
+        var cleaned = String()
+        cleaned.reserveCapacity(chars.count)
+        for i in chars.indices {
+            if chars[i] == "੍" {
+                let next = (i + 1 < chars.count) ? chars[i + 1] : nil
+                if next == "ਰ" || next == "ਹ" || next == "ਵ" {
+                    cleaned.append(chars[i])
+                }
+                continue
+            }
+            cleaned.append(chars[i])
         }
+
         let polish: [(String, String)] = [
             ("ਮੈਨੂ", "ਮੈਨੂੰ"), ("ਮੀਨੂ", "ਮੈਨੂੰ"), ("ਤੈਨੂ", "ਤੈਨੂੰ"),
             ("ਤੁਸੀ", "ਤੁਸੀਂ"), ("ਅਸੀ", "ਅਸੀਂ"), ("ਨਹੀ ", "ਨਹੀਂ "),
-            ("ਹਾਂ ਜੀ", "ਹਾਂਜੀ"), ("ਸਤ ਸ੍ਰੀ", "ਸਤਿ ਸ੍ਰੀ")
+            ("ਹਾਂ ਜੀ", "ਹਾਂਜੀ"), ("ਸਤ ਸ੍ਰੀ", "ਸਤਿ ਸ੍ਰੀ"),
+            ("ਕਰੂੰਗਾ", "ਕਰਾਂਗਾ"), ("ਕਰੂੰਗੀ", "ਕਰਾਂਗੀ")
         ]
         for (k, v) in polish {
-            out = out.replacingOccurrences(of: k, with: v)
+            cleaned = cleaned.replacingOccurrences(of: k, with: v)
         }
-        return out
+        return cleaned
     }
 
     public static func convertGurmukhiToDevanagari(_ text: String) -> String {
@@ -1339,8 +1409,18 @@ public enum IndicScriptNormalizer {
         return out
     }
 
-    /// Converts Gurmukhi or Devanagari characters into speakable Latin phonetics.
+    /// Converts Indic scripts (Gurmukhi, Devanagari, Telugu, Tamil, Bengali, Gujarati, Kannada) into speakable Latin phonetics.
     public static func toPhoneticLatin(_ text: String) -> String {
+        let hasOtherIndic = text.unicodeScalars.contains {
+            (0x0980...0x09FF).contains($0.value) ||
+            (0x0A80...0x0D7F).contains($0.value)
+        }
+        if hasOtherIndic,
+           let latin = text.applyingTransform(.toLatin, reverse: false)?
+            .applyingTransform(.stripDiacritics, reverse: false) {
+            return latin
+        }
+
         let deva = convertGurmukhiToDevanagari(text)
         let consonants: [Character: String] = [
             "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
@@ -2613,6 +2693,160 @@ public final class VoicePipelineManager: ObservableObject {
 
     private var teacherSingleCaptureTask: Task<String?, Never>?
 
+    public func cancelTeacherPlayback() {
+        audioIO.cancelPlaybackImmediately()
+        if state == .speaking {
+            audioIO.stop()
+            transition(to: .uninitialized)
+        }
+    }
+
+    /// Speaks a sequence of English/phonetic clauses in one audio playback session (cancellable at any point).
+    public func speakTeacherSequence(_ clauses: [String], speedOverride: Float? = nil) async {
+        let nonEmpty = clauses
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !nonEmpty.isEmpty else { return }
+
+        do {
+            if state == .listening {
+                await stopPipeline()
+            }
+            try audioIO.configureForPlaybackOnly()
+            try await ttsEngine.loadSession()
+            transition(to: .speaking)
+
+            let activeSpeed = speedOverride ?? config.tts.speed
+            for item in nonEmpty {
+                if Task.isCancelled { break }
+                let speakable = Self.extractSpeakableFromDisplay(item)
+                guard !speakable.isEmpty else { continue }
+
+                var chunker = TransliterationStreamChunker()
+                var parts = chunker.append(token: speakable)
+                if let tail = chunker.flush() { parts.append(tail) }
+                if parts.isEmpty { parts = [speakable] }
+
+                for part in parts {
+                    if Task.isCancelled { break }
+                    let samples24k = try await ttsEngine.synthesize(phoneticClause: part, speed: activeSpeed)
+                    if Task.isCancelled { break }
+                    await audioIO.enqueuePlayback(samples24k: samples24k, maxQueuedBuffers: 2)
+                }
+                if Task.isCancelled { break }
+                await audioIO.waitForPlaybackDrain()
+            }
+            audioIO.stop()
+            transition(to: .uninitialized)
+        } catch is CancellationError {
+            audioIO.cancelPlaybackImmediately()
+            audioIO.stop()
+            transition(to: .uninitialized)
+        } catch {
+            audioIO.stop()
+            logger.error("Teacher speech failed: \(error.localizedDescription)")
+            transition(to: .uninitialized)
+        }
+    }
+
+    public static func teacherGuidance(
+        topic: TeacherTopic,
+        nativeLanguage: PipelineLanguage,
+        targetLanguage: PipelineLanguage
+    ) -> (displayEnglish: String, speakEnglish: String, displayKnown: String?, speakKnown: String?) {
+        let known = (nativeLanguage == .auto) ? PipelineLanguage.punjabi : nativeLanguage
+        let target = (targetLanguage == .auto) ? PipelineLanguage.english : targetLanguage
+
+        let en = "Welcome to \(topic.title)! Say something in \(known.displayName) using Mic or Keyboard, or practice this \(target.displayName) starter:"
+        let enSpeak = "Welcome to \(topic.title). Say something in \(known.displayName) using Mic or Keyboard, or practice this \(target.displayName) starter."
+
+        switch known {
+        case .english, .auto:
+            return (en, enSpeak, nil, nil)
+        case .punjabi:
+            return (
+                en,
+                enSpeak,
+                "ਜੀ ਆਇਆਂ ਨੂੰ! ਮਾਈਕ ਜਾਂ ਕੀਬੋਰਡ ਨਾਲ ਪੰਜਾਬੀ ਵਿੱਚ ਕੁਝ ਕਹੋ, ਜਾਂ ਹੇਠਾਂ ਦਿੱਤੇ \(target.displayName) ਵਾਕ ਦਾ ਅਭਿਆਸ ਕਰੋ:",
+                "Jee aayaan nu! Mic jaan keyboard naal Punjabi vich kujh kaho, jaan hethaan ditte \(target.displayName) vaak da abhyaas karo."
+            )
+        case .hindi:
+            return (
+                en,
+                enSpeak,
+                "स्वागत है! माइक या कीबोर्ड से हिन्दी में कुछ कहें, या नीचे दिए \(target.displayName) वाक्य का अभ्यास करें:",
+                "Swagat hai! Mic ya keyboard se Hindi mein kuch kahein, ya neeche diye \(target.displayName) vakya ka abhyaas karein."
+            )
+        case .bengali:
+            return (
+                en,
+                enSpeak,
+                "স্বাগতম! মাইক বা কিবোর্ড দিয়ে বাংলায় কিছু বলুন, অথবা নিচের \(target.displayName) বাক্যটি অনুশীলন করুন:",
+                "Shwagotom! Mic ba keyboard diye Banglaay kichhu bolun, othoba nicher \(target.displayName) bakkoti onushilon korun."
+            )
+        case .tamil:
+            return (
+                en,
+                enSpeak,
+                "நல்வரவு! மைக் அல்லது விசைப்பலகை மூலம் தமிழில் ஏதாவது சொல்லுங்கள், அல்லது கீழே உள்ள \(target.displayName) வாக்கியத்தைப் பழகுங்கள்:",
+                "Nalvaravu! Mic alladhu keyboard moolam Tamilil edhaavadhu sollungal, alladhu keezhe ulla \(target.displayName) vaarthaigalai pazhagungal."
+            )
+        case .telugu:
+            return (
+                en,
+                enSpeak,
+                "స్వాగతం! మైక్ లేదా కీబోర్డ్‌తో తెలుగులో ఏదైనా చెప్పండి, లేదా క్రింది \(target.displayName) వాక్యాన్ని సాధన చేయండి:",
+                "Swagatam! Mic leda keyboard tho Telugu lo edaina cheppandi, leda krindi \(target.displayName) vaakyanni saadhana cheyandi."
+            )
+        case .marathi:
+            return (
+                en,
+                enSpeak,
+                "स्वागत आहे! माइक किंवा कीबोर्डने मराठीत काहीतरी बोला, किंवा खालील \(target.displayName) वाक्याचा सराव करा:",
+                "Swagat aahe! Mic kinva keyboard ne Marathit kaahitari bola, kinva khaalil \(target.displayName) vaakyacha saraav kara."
+            )
+        case .gujarati:
+            return (
+                en,
+                enSpeak,
+                "સ્વાગત છે! માઇક અથવા કીબોર્ડથી ગુજરાતીમાં કંઈક બોલો, અથવા નીચેના \(target.displayName) વાક્યનો અભ્યાસ કરો:",
+                "Swagat chhe! Mic athva keyboard thi Gujarati maan kaink bolo, athva neechena \(target.displayName) vaakya no abhyaas karo."
+            )
+        case .kannada:
+            return (
+                en,
+                enSpeak,
+                "ಸ್ವಾಗತ! ಮೈಕ್ ಅಥವಾ ಕೀಬೋರ್ಡ್ ಮೂಲಕ ಕನ್ನಡದಲ್ಲಿ ಏನಾದರೂ ಹೇಳಿ, ಅಥವಾ ಕೆಳಗಿನ \(target.displayName) ವಾಕ್ಯವನ್ನು ಅಭ್ಯಾಸ ಮಾಡಿ:",
+                "Swagata! Mic athava keyboard moolaka Kannadadalli enaadaru heli, athava kelagina \(target.displayName) vaakyavannu abhyaasa maadi."
+            )
+        }
+    }
+
+    public static func instantTeacherLesson(
+        topic: TeacherTopic,
+        nativeLanguage: PipelineLanguage,
+        targetLanguage: PipelineLanguage,
+        challengeIndex: Int
+    ) -> TeacherTurnResult {
+        let known = (nativeLanguage == .auto) ? PipelineLanguage.punjabi : nativeLanguage
+        let target = (targetLanguage == .auto) ? PipelineLanguage.english : targetLanguage
+
+        let guidance = teacherGuidance(topic: topic, nativeLanguage: known, targetLanguage: target)
+        let entry = curriculumEntry(topic: topic, index: challengeIndex)
+        let knownPair = entry.phrases[known] ?? (entry.english, entry.english)
+        let targetPair = entry.phrases[target] ?? (entry.english, entry.english)
+
+        return TeacherTurnResult(
+            teacherPromptText: guidance.displayEnglish,
+            teacherGuidanceSecondary: guidance.displayKnown,
+            sourceNativeScript: knownPair.native,
+            englishMeaning: entry.english,
+            targetNativeScript: targetPair.native,
+            targetPhoneticSpeak: targetPair.speak,
+            grammarTip: "Tap Listen Slowly (0.78x) to hear every syllable clearly, then tap Practice \(target.displayName)!"
+        )
+    }
+
     public func generateTeacherTurn(
         topic: TeacherTopic,
         nativeLanguage: PipelineLanguage,
@@ -2620,18 +2854,33 @@ public final class VoicePipelineManager: ObservableObject {
         learnerInput: String?,
         challengeIndex: Int
     ) async -> TeacherTurnResult {
+        let known = (nativeLanguage == .auto) ? PipelineLanguage.punjabi : nativeLanguage
+        let target = (targetLanguage == .auto) ? PipelineLanguage.english : targetLanguage
+
+        guard let rawInput = learnerInput?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawInput.isEmpty else {
+            return Self.instantTeacherLesson(
+                topic: topic,
+                nativeLanguage: known,
+                targetLanguage: target,
+                challengeIndex: challengeIndex
+            )
+        }
+
         if state == .listening || state == .speaking || state == .thinking {
             await stopPipeline()
         }
 
-        let teacherPrompt = GemmaSystemPrompt.buildTeacherPrompt(
-            nativeLanguage: nativeLanguage,
-            targetLanguage: targetLanguage,
-            topic: topic
+        let cleanInput = IndicScriptNormalizer.normalize(
+            rawInput,
+            inputLanguage: known,
+            legacyMode: config.asr.scriptDisplayMode
         )
 
-        var rawOutput = ""
+        // Use the focused single-goal translation prompt so Gemma 4 E2B never drifts back into the source language.
+        let translatePrompt = GemmaSystemPrompt.build(input: known, output: target, mode: .translate)
         let llmAlreadyLoaded = await llmBrain.isLoaded
+
         if llmAlreadyLoaded || MemoryBudgetManager.availableMemoryMB() >= 1000 {
             do {
                 if config.residencyPolicy != .alwaysResident {
@@ -2643,33 +2892,63 @@ public final class VoicePipelineManager: ObservableObject {
                 if !llmAlreadyLoaded {
                     try await llmBrain.loadEngine()
                 }
-                try await llmBrain.updateSystemPrompt(teacherPrompt)
+                try await llmBrain.updateSystemPrompt(translatePrompt)
 
-                let query: String
-                if let learnerInput, !learnerInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    query = "The student said/typed in \(nativeLanguage.displayName): \"\(learnerInput)\". Translate it into \(targetLanguage.displayName) for them to learn and practice."
-                } else {
-                    query = "NEW_CHALLENGE #\(challengeIndex + 1) on topic '\(topic.title)'. Ask the student an interactive starter question in \(nativeLanguage.displayName) and teach one useful \(targetLanguage.displayName) phrase."
-                }
-
-                let stream = await llmBrain.streamResponse(for: query)
-                for try await token in stream {
+                let firstQuery = "Translate this \(known.displayName) phrase into \(target.displayName) (\(target.nativeScriptLabel)) ONLY:\n\"\(cleanInput)\""
+                var rawOutput = ""
+                let stream1 = await llmBrain.streamResponse(for: firstQuery)
+                for try await token in stream1 {
                     rawOutput.append(token)
                 }
+
+                if let parsed = Self.validatedTranslationResult(
+                    rawOutput: rawOutput,
+                    sourceNative: cleanInput,
+                    known: known,
+                    target: target
+                ) {
+                    return parsed
+                }
+
+                // Retry once after clearing conversation if Gemma emitted the wrong script (e.g. Gurmukhi instead of Telugu).
+                logger.warning("Teacher translation missed \(target.displayName) script on attempt 1; retrying cleanly.")
+                try await llmBrain.resetConversation()
+                let retryQuery = "CRITICAL: Translate ONLY into \(target.displayName) (\(target.nativeScriptLabel) script), NOT \(known.displayName). Phrase: \"\(cleanInput)\""
+                var retryOutput = ""
+                let stream2 = await llmBrain.streamResponse(for: retryQuery)
+                for try await token in stream2 {
+                    retryOutput.append(token)
+                }
+
+                if let parsedRetry = Self.validatedTranslationResult(
+                    rawOutput: retryOutput,
+                    sourceNative: cleanInput,
+                    known: known,
+                    target: target
+                ) {
+                    return parsedRetry
+                }
             } catch {
-                logger.warning("Teacher Gemma 4 fallback: \(error.localizedDescription)")
+                logger.warning("Teacher Gemma translation error: \(error.localizedDescription)")
             }
         }
 
-        let result = Self.parseTeacherOutput(
-            raw: rawOutput,
+        // Honest fallback: keep a genuine starter in target language rather than showing wrong-language text under target label.
+        let starter = Self.instantTeacherLesson(
             topic: topic,
-            nativeLanguage: nativeLanguage,
-            targetLanguage: targetLanguage,
-            learnerInput: learnerInput,
+            nativeLanguage: known,
+            targetLanguage: target,
             challengeIndex: challengeIndex
         )
-        return result
+        return TeacherTurnResult(
+            teacherPromptText: "Could not verify a \(target.displayName) translation on-device for \"\(cleanInput)\". Try speaking a shorter phrase, or practice this \(target.displayName) phrase:",
+            teacherGuidanceSecondary: nil,
+            sourceNativeScript: starter.sourceNativeScript,
+            englishMeaning: starter.englishMeaning,
+            targetNativeScript: starter.targetNativeScript,
+            targetPhoneticSpeak: starter.targetPhoneticSpeak,
+            grammarTip: "Tip: Speak short everyday sentences in \(known.displayName) for the most accurate offline \(target.displayName) translation."
+        )
     }
 
     public func captureSingleTeacherUtterance(inputLanguage: PipelineLanguage) async throws -> String {
@@ -2716,127 +2995,350 @@ public final class VoicePipelineManager: ObservableObject {
         transition(to: .uninitialized)
     }
 
-    private static func parseTeacherOutput(
-        raw: String,
-        topic: TeacherTopic,
-        nativeLanguage: PipelineLanguage,
-        targetLanguage: PipelineLanguage,
-        learnerInput: String?,
-        challengeIndex: Int
-    ) -> TeacherTurnResult {
-        var prompt = ""
+    private static func validatedTranslationResult(
+        rawOutput: String,
+        sourceNative: String,
+        known: PipelineLanguage,
+        target: PipelineLanguage
+    ) -> TeacherTurnResult? {
+        let trimmed = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
         var nativeLine = ""
         var speakLine = ""
-        var tip = ""
-
-        for line in raw.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let upper = trimmed.uppercased()
-            if upper.hasPrefix("PROMPT:") {
-                prompt = String(trimmed.dropFirst("PROMPT:".count)).trimmingCharacters(in: .whitespaces)
-            } else if upper.hasPrefix("TARGET_NATIVE:") {
-                nativeLine = String(trimmed.dropFirst("TARGET_NATIVE:".count)).trimmingCharacters(in: .whitespaces)
-            } else if upper.hasPrefix("TARGET_SPEAK:") {
-                speakLine = String(trimmed.dropFirst("TARGET_SPEAK:".count)).trimmingCharacters(in: .whitespaces)
-            } else if upper.hasPrefix("TIP:") {
-                tip = String(trimmed.dropFirst("TIP:".count)).trimmingCharacters(in: .whitespaces)
+        for line in trimmed.components(separatedBy: .newlines) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            let upper = t.uppercased()
+            if upper.hasPrefix("NATIVE:") {
+                nativeLine = String(t.dropFirst("NATIVE:".count)).trimmingCharacters(in: .whitespaces)
+            } else if upper.hasPrefix("SPEAK:") {
+                speakLine = String(t.dropFirst("SPEAK:".count)).trimmingCharacters(in: .whitespaces)
             }
         }
 
-        if !speakLine.isEmpty || !nativeLine.isEmpty {
-            let resolvedSpeak = !speakLine.isEmpty ? IndicScriptNormalizer.toPhoneticLatin(speakLine) : IndicScriptNormalizer.toPhoneticLatin(nativeLine)
-            let resolvedNative = !nativeLine.isEmpty ? nativeLine : speakLine
-            let resolvedPrompt = !prompt.isEmpty ? prompt : "Listen carefully and practice repeating this phrase!"
+        if target == .english {
+            let candidate = !nativeLine.isEmpty ? nativeLine : (!speakLine.isEmpty ? speakLine : trimmed)
+            let hasIndic = candidate.unicodeScalars.contains { (0x0900...0x0D7F).contains($0.value) }
+            guard !hasIndic, !candidate.isEmpty else { return nil }
             return TeacherTurnResult(
-                teacherPromptText: resolvedPrompt,
-                targetNativeScript: resolvedNative,
-                targetPhoneticSpeak: resolvedSpeak,
-                grammarTip: tip
+                teacherPromptText: "Great! Here is how to say your phrase in English. Tap Listen or Practice English:",
+                teacherGuidanceSecondary: nil,
+                sourceNativeScript: sourceNative,
+                englishMeaning: "",
+                targetNativeScript: candidate,
+                targetPhoneticSpeak: candidate,
+                grammarTip: "Tap Slow (0.78x) to hear every word clearly, then tap Practice English!"
             )
         }
 
-        return builtInTeacherFallback(
-            topic: topic,
-            nativeLanguage: nativeLanguage,
-            targetLanguage: targetLanguage,
-            learnerInput: learnerInput,
-            challengeIndex: challengeIndex
+        guard !nativeLine.isEmpty else { return nil }
+        guard matchesTargetScript(nativeLine, language: target) else { return nil }
+        let resolvedSpeak = !speakLine.isEmpty
+            ? IndicScriptNormalizer.toPhoneticLatin(speakLine)
+            : IndicScriptNormalizer.toPhoneticLatin(nativeLine)
+        guard !resolvedSpeak.isEmpty else { return nil }
+
+        return TeacherTurnResult(
+            teacherPromptText: "Great! Here is your \(known.displayName) phrase translated into \(target.displayName):",
+            teacherGuidanceSecondary: nil,
+            sourceNativeScript: sourceNative,
+            englishMeaning: "",
+            targetNativeScript: nativeLine,
+            targetPhoneticSpeak: resolvedSpeak,
+            grammarTip: "Tap Listen Slowly (0.78x) to hear every syllable clearly, then tap Practice \(target.displayName)!"
         )
     }
 
-    private static func builtInTeacherFallback(
-        topic: TeacherTopic,
-        nativeLanguage: PipelineLanguage,
-        targetLanguage: PipelineLanguage,
-        learnerInput: String?,
-        challengeIndex: Int
-    ) -> TeacherTurnResult {
-        let knownName = nativeLanguage.displayName
-        let targetName = targetLanguage.displayName
-        let starterPairs: [TeacherTopic: [(native: String, speak: String, meaning: String)]] = [
+    private static func matchesTargetScript(_ text: String, language: PipelineLanguage) -> Bool {
+        let range: ClosedRange<UInt32>
+        switch language {
+        case .hindi, .marathi: range = 0x0900...0x097F
+        case .bengali: range = 0x0980...0x09FF
+        case .punjabi: range = 0x0A00...0x0A7F
+        case .gujarati: range = 0x0A80...0x0AFF
+        case .tamil: range = 0x0B80...0x0BFF
+        case .telugu: range = 0x0C00...0x0C7F
+        case .kannada: range = 0x0C80...0x0CFF
+        case .english, .auto:
+            return !text.unicodeScalars.contains { (0x0900...0x0D7F).contains($0.value) }
+        }
+        return text.unicodeScalars.contains { range.contains($0.value) }
+    }
+
+    private struct TeacherCurriculumEntry {
+        let english: String
+        let phrases: [PipelineLanguage: (native: String, speak: String)]
+    }
+
+    private static func curriculumEntry(topic: TeacherTopic, index: Int) -> TeacherCurriculumEntry {
+        let bank: [TeacherTopic: [TeacherCurriculumEntry]] = [
             .greetings: [
-                ("Hello, how are you?", "Hello, how are you?", "Greeting someone politely"),
-                ("Nice to meet you!", "Nice to meet you!", "Friendly introduction")
+                TeacherCurriculumEntry(
+                    english: "Hello, how are you?",
+                    phrases: [
+                        .punjabi: ("ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਤੁਸੀਂ ਕਿਵੇਂ ਹੋ?", "Sat sri akaal, tusi kiven ho?"),
+                        .hindi: ("नमस्ते, आप कैसे हैं?", "Namaste, aap kaise hain?"),
+                        .english: ("Hello, how are you?", "Hello, how are you?"),
+                        .bengali: ("নমস্কার, আপনি কেমন আছেন?", "Nomoshkar, aapni kemon achhen?"),
+                        .tamil: ("வணக்கம், நீங்கள் எப்படி இருக்கிறீர்கள்?", "Vanakkam, neengal eppadi irukkireergal?"),
+                        .telugu: ("నమస్కారం, మీరు ఎలా ఉన్నారు?", "Namaskaram, meeru ela unnaaru?"),
+                        .marathi: ("नमस्कार, तुम्ही कसे आहात?", "Namaskar, tumhi kase aahaat?"),
+                        .gujarati: ("નમસ્તે, તમે કેમ છો?", "Namaste, tame kem chho?"),
+                        .kannada: ("ನಮಸ್ಕಾರ, ನೀವು ಹೇಗಿದ್ದೀರಿ?", "Namaskara, neevu hegiddiri?")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "I am fine, thank you.",
+                    phrases: [
+                        .punjabi: ("ਮੈਂ ਠੀਕ ਹਾਂ, ਧੰਨਵਾਦ।", "Main theek haan, dhannvaad."),
+                        .hindi: ("मैं ठीक हूँ, धन्यवाद।", "Main theek hoon, dhanyavaad."),
+                        .english: ("I am fine, thank you.", "I am fine, thank you."),
+                        .bengali: ("আমি ভালো আছি, ধন্যবাদ।", "Aami bhalo achhi, dhonnobad."),
+                        .tamil: ("நான் நலமாக இருக்கிறேன், நன்றி.", "Naan nalamaaga irukkiren, nandri."),
+                        .telugu: ("నేను బాగున్నాను, ధన్యవాదాలు.", "Nenu baagunnaanu, dhanyavaadaalu."),
+                        .marathi: ("मी ठीक आहे, धन्यवाद.", "Mi theek aahe, dhanyavaad."),
+                        .gujarati: ("હું મજામાં છું, આભાર.", "Hu majaamaan chhu, aabhaar."),
+                        .kannada: ("ನಾನು ಚೆನ್ನಾಗಿದ್ದೇನೆ, ಧನ್ಯವಾದಗಳು.", "Naanu chennaagiddene, dhanyavaadagalu.")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "Nice to meet you!",
+                    phrases: [
+                        .punjabi: ("ਤੁਹਾਨੂੰ ਮਿਲ ਕੇ ਬਹੁਤ ਖੁਸ਼ੀ ਹੋਈ।", "Tuhanu mil ke bahut khushi hoi."),
+                        .hindi: ("आपसे मिलकर बहुत खुशी हुई।", "Aapse milkar bahut khushi hui."),
+                        .english: ("Nice to meet you!", "Nice to meet you!"),
+                        .bengali: ("আপনার সাথে দেখা হয়ে ভালো লাগল।", "Aapnar shathe dekha hoye bhalo laglo."),
+                        .tamil: ("உங்களை சந்தித்ததில் மகிழ்ச்சி.", "Ungalai sandhithadhil magizhchi."),
+                        .telugu: ("మిమ్మల్ని కలవడం చాలా సంతోషంగా ఉంది.", "Mimmalni kalavadam chala santoshanga undi."),
+                        .marathi: ("तुम्हाला भेटून खूप आनंद झाला.", "Tumhala bhetun khoop aanand jhaala."),
+                        .gujarati: ("તમને મળીને ખૂબ આનંદ થયો.", "Tamne maline khoob aanand thayo."),
+                        .kannada: ("ನಿಮ್ಮನ್ನು ಭೇಟಿಯಾಗಿ ತುಂಬಾ ಸಂತೋಷವಾಯಿತು.", "Nimmannu bhetiyaagi tumba santoshavaayitu.")
+                    ]
+                )
             ],
             .travel: [
-                ("Where is the train station?", "Where is the train station?", "Asking for directions"),
-                ("How far is it from here?", "How far is it from here?", "Checking distance")
+                TeacherCurriculumEntry(
+                    english: "Where is the train station?",
+                    phrases: [
+                        .punjabi: ("ਰੇਲਵੇ ਸਟੇਸ਼ਨ ਕਿੱਥੇ ਹੈ?", "Railway station kitthe hai?"),
+                        .hindi: ("रेलवे स्टेशन कहाँ है?", "Railway station kahaan hai?"),
+                        .english: ("Where is the train station?", "Where is the train station?"),
+                        .bengali: ("রেল স্টেশন কোথায়?", "Rail station kothaay?"),
+                        .tamil: ("ரயில் நிலையம் எங்கே இருக்கிறது?", "Rayil nilaiyam enge irukkiradhu?"),
+                        .telugu: ("రైల్వే స్టేషన్ ఎక్కడ ఉంది?", "Railway station ekkada undi?"),
+                        .marathi: ("रेल्वे स्टेशन कुठे आहे?", "Railway station kuthe aahe?"),
+                        .gujarati: ("રેલવે સ્ટેશન ક્યાં છે?", "Railway station kyaan chhe?"),
+                        .kannada: ("ರೈಲ್ವೆ ನಿಲ್ದಾಣ ಎಲ್ಲಿದೆ?", "Railway nildana ellide?")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "How much is the ticket?",
+                    phrases: [
+                        .punjabi: ("ਟਿਕਟ ਕਿੰਨੇ ਦੀ ਹੈ?", "Ticket kinne di hai?"),
+                        .hindi: ("टिकट कितने का है?", "Ticket kitne ka hai?"),
+                        .english: ("How much is the ticket?", "How much is the ticket?"),
+                        .bengali: ("টিকিটের দাম কত?", "Ticketer daam koto?"),
+                        .tamil: ("டிக்கெட் விலை என்ன?", "Ticket vilai enna?"),
+                        .telugu: ("టికెట్ ధర ఎంత?", "Ticket dhara entha?"),
+                        .marathi: ("तिकीट किती रुपयांचे आहे?", "Tikit kiti rupayanche aahe?"),
+                        .gujarati: ("ટિકિટ કેટલાની છે?", "Ticket ketlaani chhe?"),
+                        .kannada: ("ಟಿಕೆಟ್ ಬೆಲೆ ಎಷ್ಟು?", "Ticket bele eshtu?")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "Please stop right here.",
+                    phrases: [
+                        .punjabi: ("ਕਿਰਪਾ ਕਰਕੇ ਇੱਥੇ ਰੁਕੋ।", "Kirpa karke itthe ruko."),
+                        .hindi: ("कृपया यहीं रुकिए।", "Kripaya yaheen rukiye."),
+                        .english: ("Please stop right here.", "Please stop right here."),
+                        .bengali: ("দয়া করে এখানে থামুন।", "Doya kore ekhane thamun."),
+                        .tamil: ("தயவுசெய்து இங்கே நிறுத்துங்கள்.", "Dhayavuseidhu inge nirutthungal."),
+                        .telugu: ("దయచేసి ఇక్కడ ఆపండి.", "Dayachesi ikkada aapandi."),
+                        .marathi: ("कृपया इथेच थांबा.", "Kripaya ithech thaamba."),
+                        .gujarati: ("મહેરબાની કરીને અહીં ઊભા રહો.", "Maherbani karine ahin ubha raho."),
+                        .kannada: ("ದಯವಿಟ್ಟು ಇಲ್ಲೇ ನಿಲ್ಲಿಸಿ.", "Dayavittu ille nillisi.")
+                    ]
+                )
             ],
             .food: [
-                ("Please bring some water.", "Please bring some water.", "Ordering at a restaurant"),
-                ("The food is very delicious!", "The food is very delicious!", "Complimenting a meal")
+                TeacherCurriculumEntry(
+                    english: "Please bring some water.",
+                    phrases: [
+                        .punjabi: ("ਕਿਰਪਾ ਕਰਕੇ ਥੋੜ੍ਹਾ ਪਾਣੀ ਲਿਆਓ।", "Kirpa karke thoda paani liaao."),
+                        .hindi: ("कृपया थोड़ा पानी लाइए।", "Kripaya thoda paani laaiye."),
+                        .english: ("Please bring some water.", "Please bring some water."),
+                        .bengali: ("দয়া করে একটু জল আনুন।", "Doya kore ektu jol aanun."),
+                        .tamil: ("தயவுசெய்து கொஞ்சம் தண்ணீர் கொண்டு வாருங்கள்.", "Dhayavuseidhu konjam thanneer kondu vaarungal."),
+                        .telugu: ("దయచేసి కొంచెం మంచి నీళ్లు తీసుకురండి.", "Dayachesi konchem manchi neellu teesukurandi."),
+                        .marathi: ("कृपया थोडे पाणी आणा.", "Kripaya thode paani aana."),
+                        .gujarati: ("મહેરબાની કરીને થોડું પાણી લાવો.", "Maherbani karine thodu paani laavo."),
+                        .kannada: ("ದಯವಿಟ್ಟು ಸ್ವಲ್ಪ ನೀರು ತಂದುಕೊಡಿ.", "Dayavittu swalpa neeru tandukodi.")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "The food is very delicious!",
+                    phrases: [
+                        .punjabi: ("ਖਾਣਾ ਬਹੁਤ ਸੁਆਦ ਹੈ।", "Khaana bahut suaad hai."),
+                        .hindi: ("खाना बहुत स्वादिष्ट है।", "Khaana bahut swadisht hai."),
+                        .english: ("The food is very delicious!", "The food is very delicious!"),
+                        .bengali: ("খাবারটা খুব সুস্বাদু!", "Khabarta khub shushwadu!"),
+                        .tamil: ("உணவு மிகவும் சுவையாக உள்ளது.", "Unavu migavum suvaiyaaga ulladhu."),
+                        .telugu: ("భోజనం చాలా రుచిగా ఉంది!", "Bhojanam chala ruchigaa undi!"),
+                        .marathi: ("जेवण खूप चविष्ट आहे.", "Jevan khoop chavisht aahe."),
+                        .gujarati: ("જમવાનું ખૂબ સ્વાદિષ્ટ છે.", "Jamvaanu khoob swadisht chhe."),
+                        .kannada: ("ಊಟ ತುಂಬಾ ರುಚಿಯಾಗಿದೆ!", "Oota tumba ruchiyaagide!")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "I would like tea, please.",
+                    phrases: [
+                        .punjabi: ("ਮੈਨੂੰ ਚਾਹ ਚਾਹੀਦੀ ਹੈ।", "Mainu chaah chaahidi hai."),
+                        .hindi: ("मुझे चाय चाहिए।", "Mujhe chai chahiye."),
+                        .english: ("I would like tea, please.", "I would like tea, please."),
+                        .bengali: ("আমাকে এক কাপ চা দিন।", "Aamake ek cup cha din."),
+                        .tamil: ("எனக்கு ஒரு தேநீர் வேண்டும்.", "Enakku oru theneer vendum."),
+                        .telugu: ("నాకు ఒక టీ కావాలి.", "Naaku oka tea kaavaali."),
+                        .marathi: ("मला चहा हवा आहे.", "Mala chaha hava aahe."),
+                        .gujarati: ("મને ચા જોઈએ છે.", "Mane cha joiye chhe."),
+                        .kannada: ("ನನಗೆ ಚಹಾ ಬೇಕು.", "Nanage chaha beku.")
+                    ]
+                )
             ],
             .shopping: [
-                ("How much does this cost?", "How much does this cost?", "Asking the price"),
-                ("Can you give a small discount?", "Can you give a small discount?", "Polite bargaining")
+                TeacherCurriculumEntry(
+                    english: "How much does this cost?",
+                    phrases: [
+                        .punjabi: ("ਇਸ ਦੀ ਕੀਮਤ ਕੀ ਹੈ?", "Is di keemat ki hai?"),
+                        .hindi: ("इसकी कीमत क्या है?", "Iski keemat kya hai?"),
+                        .english: ("How much does this cost?", "How much does this cost?"),
+                        .bengali: ("এটার দাম কত?", "Etar daam koto?"),
+                        .tamil: ("இதன் விலை என்ன?", "Idhan vilai enna?"),
+                        .telugu: ("దీని ధర ఎంత?", "Deeni dhara entha?"),
+                        .marathi: ("याची किंमत किती आहे?", "Yachi kimmat kiti aahe?"),
+                        .gujarati: ("આની કિંમત શું છે?", "Aani kimmat shun chhe?"),
+                        .kannada: ("ಇದರ ಬೆಲೆ ಎಷ್ಟು?", "Idara bele eshtu?")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "Can you reduce the price?",
+                    phrases: [
+                        .punjabi: ("ਕੀ ਤੁਸੀਂ ਕੀਮਤ ਥੋੜ੍ਹੀ ਘੱਟ ਕਰ ਸਕਦੇ ਹੋ?", "Ki tusi keemat thodi ghatt kar sakde ho?"),
+                        .hindi: ("क्या आप कीमत थोड़ी कम कर सकते हैं?", "Kya aap keemat thodi kam kar sakte hain?"),
+                        .english: ("Can you reduce the price?", "Can you reduce the price?"),
+                        .bengali: ("দামটা একটু কমানো যাবে কি?", "Daamta ektu komano jabe ki?"),
+                        .tamil: ("விலையைக் கொஞ்சம் குறைக்க முடியுமா?", "Vilaiyai konjam kuraikka mudiyumaa?"),
+                        .telugu: ("ధర కొంచెం తగ్గించగలరా?", "Dhara konchem tagginchagalaraa?"),
+                        .marathi: ("किंमत थोडी कमी कराल का?", "Kimmat thodi kami karaal ka?"),
+                        .gujarati: ("શું તમે કિંમત થોડી ઓછી કરી શકો છો?", "Shun tame kimmat thodi ochhi kari shako chho?"),
+                        .kannada: ("ಬೆಲೆ ಸ್ವಲ್ಪ ಕಡಿಮೆ ಮಾಡಬಹುದಾ?", "Bele swalpa kadime maadabahudaa?")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "I will take this one.",
+                    phrases: [
+                        .punjabi: ("ਮੈਂ ਇਹ ਵਾਲਾ ਲਵਾਂਗਾ।", "Main eh vaala lavaanga."),
+                        .hindi: ("मैं यह वाला लूँगा।", "Main yeh vaala loonga."),
+                        .english: ("I will take this one.", "I will take this one."),
+                        .bengali: ("আমি এটাই নেব।", "Aami etai nebo."),
+                        .tamil: ("நான் இதை எடுத்துக்கொள்கிறேன்.", "Naan idhai edutthukkolgiren."),
+                        .telugu: ("నేను ఇది తీసుకుంటాను.", "Nenu idi teesukuntaanu."),
+                        .marathi: ("मी हे घेतो.", "Mi he gheto."),
+                        .gujarati: ("હું આ લઈશ.", "Hu aa laish."),
+                        .kannada: ("ನಾನು ಇದನ್ನು ತೆಗೆದುಕೊಳ್ಳುತ್ತೇನೆ.", "Naanu idannu tegedukolluttene.")
+                    ]
+                )
             ],
             .daily: [
-                ("What are you doing today?", "What are you doing today?", "Casual daily conversation"),
-                ("I am learning a new language.", "I am learning a new language.", "Sharing your goal")
+                TeacherCurriculumEntry(
+                    english: "What is your name?",
+                    phrases: [
+                        .punjabi: ("ਤੁਹਾਡਾ ਨਾਮ ਕੀ ਹੈ?", "Tuhada naam ki hai?"),
+                        .hindi: ("आपका नाम क्या है?", "Aapka naam kya hai?"),
+                        .english: ("What is your name?", "What is your name?"),
+                        .bengali: ("আপনার নাম কী?", "Aapnar naam ki?"),
+                        .tamil: ("உங்கள் பெயர் என்ன?", "Ungal peyar enna?"),
+                        .telugu: ("మీ పేరు ఏమిటి?", "Mee peru emiti?"),
+                        .marathi: ("तुमचे नाव काय आहे?", "Tumche naav kaay aahe?"),
+                        .gujarati: ("તમારું નામ શું છે?", "Tamaaru naam shun chhe?"),
+                        .kannada: ("ನಿಮ್ಮ ಹೆಸರು ಏನು?", "Nimma hesaru enu?")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "I am learning a new language.",
+                    phrases: [
+                        .punjabi: ("ਮੈਂ ਇੱਕ ਨਵੀਂ ਭਾਸ਼ਾ ਸਿੱਖ ਰਿਹਾ ਹਾਂ।", "Main ikk navin bhasha sikh reha haan."),
+                        .hindi: ("मैं एक नई भाषा सीख रहा हूँ।", "Main ek nayi bhasha seekh raha hoon."),
+                        .english: ("I am learning a new language.", "I am learning a new language."),
+                        .bengali: ("আমি একটি নতুন ভাষা শিখছি।", "Aami ekti notun bhasha shikhchhi."),
+                        .tamil: ("நான் ஒரு புதிய மொழியைக் கற்றுக்கொள்கிறேன்.", "Naan oru pudhiya mozhiyai katrukkolgiren."),
+                        .telugu: ("నేను ఒక కొత్త భాష నేర్చుకుంటున్నాను.", "Nenu oka kotta bhasha nerchukuntunnaanu."),
+                        .marathi: ("मी एक नवीन भाषा शिकत आहे.", "Mi ek naveen bhasha shikat aahe."),
+                        .gujarati: ("હું એક નવી ભાષા શીખી રહ્યો છું.", "Hu ek navi bhasha shikhi rahyo chhu."),
+                        .kannada: ("ನಾನು ಒಂದು ಹೊಸ ಭಾಷೆಯನ್ನು ಕಲಿಯುತ್ತಿದ್ದೇನೆ.", "Naanu ondu hosa bhasheyannu kaliyuttiddene.")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "Please speak slowly.",
+                    phrases: [
+                        .punjabi: ("ਕਿਰਪਾ ਕਰਕੇ ਹੌਲੀ ਬੋਲੋ।", "Kirpa karke hauli bolo."),
+                        .hindi: ("कृपया धीरे बोलिए।", "Kripaya dheere boliye."),
+                        .english: ("Please speak slowly.", "Please speak slowly."),
+                        .bengali: ("দয়া করে ধীরে বলুন।", "Doya kore dhire bolun."),
+                        .tamil: ("தயவுசெய்து மெதுவாகப் பேசுங்கள்.", "Dhayavuseidhu medhuvaaga pesungal."),
+                        .telugu: ("దయచేసి నెమ్మదిగా మాట్లాడండి.", "Dayachesi nemmadiga maatlaadandi."),
+                        .marathi: ("कृपया हळू बोला.", "Kripaya halu bola."),
+                        .gujarati: ("મહેરબાની કરીને ધીમે બોલો.", "Maherbani karine dheeme bolo."),
+                        .kannada: ("ದಯವಿಟ್ಟು ನಿಧಾನವಾಗಿ ಮಾತನಾಡಿ.", "Dayavittu nidhaanavaagi maatanaadi.")
+                    ]
+                )
             ],
             .numbers: [
-                ("What time is it right now?", "What time is it right now?", "Asking the time"),
-                ("Please give me two tickets.", "Please give me two tickets.", "Using numbers in public")
+                TeacherCurriculumEntry(
+                    english: "What time is it right now?",
+                    phrases: [
+                        .punjabi: ("ਹੁਣ ਕਿੰਨੇ ਵਜੇ ਹਨ?", "Hun kinne vaje han?"),
+                        .hindi: ("अभी कितने बजे हैं?", "Abhi kitne baje hain?"),
+                        .english: ("What time is it right now?", "What time is it right now?"),
+                        .bengali: ("এখন কটা বাজে?", "Ekhon kota baje?"),
+                        .tamil: ("இப்போது மணி என்ன?", "Ippodhu mani enna?"),
+                        .telugu: ("ఇప్పుడు సమయం ఎంత అయింది?", "Ippudu samayam entha ayindi?"),
+                        .marathi: ("आता किती वाजले आहेत?", "Aata kiti vaajle aahet?"),
+                        .gujarati: ("અત્યારે કેટલા વાગ્યા છે?", "Atyare ketla vaagya chhe?"),
+                        .kannada: ("ಈಗ ಸಮಯ ಎಷ್ಟಾಗಿದೆ?", "Eega samaya eshtaagide?")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "Please give me two tickets.",
+                    phrases: [
+                        .punjabi: ("ਕਿਰਪਾ ਕਰਕੇ ਮੈਨੂੰ ਦੋ ਟਿਕਟਾਂ ਦਿਓ।", "Kirpa karke mainu do ticketaan dio."),
+                        .hindi: ("कृपया मुझे दो टिकट दीजिए।", "Kripaya mujhe do ticket dijiye."),
+                        .english: ("Please give me two tickets.", "Please give me two tickets."),
+                        .bengali: ("দয়া করে আমাকে দুটি টিকিট দিন।", "Doya kore aamake duti ticket din."),
+                        .tamil: ("தயவுசெய்து எனக்கு இரண்டு டிக்கெட் கொடுங்கள்.", "Dhayavuseidhu enakku irandu ticket kodungal."),
+                        .telugu: ("దయచేసి నాకు రెండు టికెట్లు ఇవ్వండి.", "Dayachesi naaku rendu ticketlu ivvandi."),
+                        .marathi: ("कृपया मला दोन तिकिटे द्या.", "Kripaya mala don tikite dya."),
+                        .gujarati: ("મહેરબાની કરીને મને બે ટિકિટ આપો.", "Maherbani karine mane be ticket aapo."),
+                        .kannada: ("ದಯವಿಟ್ಟು ನನಗೆ ಎರಡು ಟಿಕೆಟ್ ಕೊಡಿ.", "Dayavittu nanage eradu ticket kodi.")
+                    ]
+                ),
+                TeacherCurriculumEntry(
+                    english: "Wait for five minutes, please.",
+                    phrases: [
+                        .punjabi: ("ਕਿਰਪਾ ਕਰਕੇ ਪੰਜ ਮਿੰਟ ਉਡੀਕ ਕਰੋ।", "Kirpa karke panj minute udeek karo."),
+                        .hindi: ("कृपया पाँच मिनट इंतज़ार करें।", "Kripaya paanch minute intezaar karein."),
+                        .english: ("Wait for five minutes, please.", "Wait for five minutes, please."),
+                        .bengali: ("দয়া করে পাঁচ মিনিট অপেক্ষা করুন।", "Doya kore paanch minute opekkha korun."),
+                        .tamil: ("தயவுசெய்து ஐந்து நிமிடம் காத்திருங்கள்.", "Dhayavuseidhu aindhu nimidam kaatthirungal."),
+                        .telugu: ("దయచేసి ఐదు నిమిషాలు ఆగండి.", "Dayachesi aidu nimishaalu aagandi."),
+                        .marathi: ("कृपया पाच मिनिटे थांबा.", "Kripaya paach minite thaamba."),
+                        .gujarati: ("મહેરબાની કરીને પાંચ મિનિટ રાહ જુઓ.", "Maherbani karine paanch minute raah juo."),
+                        .kannada: ("ದಯವಿಟ್ಟು ಐದು ನಿಮಿಷ ಕಾಯಿರಿ.", "Dayavittu aidu nimisha kaayiri.")
+                    ]
+                )
             ]
         ]
-
-        let targetSamples: [PipelineLanguage: (native: String, speak: String)] = [
-            .punjabi: ("ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਤੁਸੀਂ ਕਿਵੇਂ ਹੋ?", "Sat sri akaal, tusi kiven ho?"),
-            .hindi: ("नमस्ते, आप कैसे हैं?", "Namaste, aap kaise hain?"),
-            .english: ("Hello, how are you doing today?", "Hello, how are you doing today?"),
-            .bengali: ("নমস্কার, আপনি কেমন আছেন?", "Nomoshkar, aapni kemon achhen?"),
-            .tamil: ("வணக்கம், நீங்கள் எப்படி இருக்கிறீர்கள்?", "Vanakkam, neengal eppadi irukkireergal?"),
-            .telugu: ("నమస్కారం, మీరు ఎలా ఉన్నారు?", "Namaskaram, meeru ela unnaaru?"),
-            .marathi: ("नमस्कार, तुम्ही कसे आहात?", "Namaskar, tumhi kase aahaat?"),
-            .gujarati: ("નમસ્તે, તમે કેમ છો?", "Namaste, tame kem chho?"),
-            .kannada: ("ನಮಸ್ಕಾರ, ನೀವು ಹೇಗಿದ್ದೀರಿ?", "Namaskara, neevu hegiddiri?")
-        ]
-
-        let list = starterPairs[topic] ?? starterPairs[.greetings]!
-        let item = list[challengeIndex % list.count]
-
-        if targetLanguage == .english {
-            let promptText = (learnerInput != nil)
-                ? "Great! In English you can say this phrase. Tap Practice Speaking to repeat it:"
-                : "Let's practice \(topic.title) in English! Try translating or repeating this phrase (\(item.meaning)):"
-            return TeacherTurnResult(
-                teacherPromptText: promptText,
-                targetNativeScript: item.native,
-                targetPhoneticSpeak: item.speak,
-                grammarTip: "Speak smoothly and tap Slow (0.78x) anytime to hear each word clearly."
-            )
-        }
-
-        let targetPair = targetSamples[targetLanguage] ?? ("Hello!", "Hello!")
-        let promptText = (learnerInput != nil)
-            ? "Here is how to say your phrase in \(targetName). Listen and try repeating it:"
-            : "Welcome to \(topic.title)! Say something in \(knownName) using Mic or Keyboard, or practice this \(targetName) starter:"
-        return TeacherTurnResult(
-            teacherPromptText: promptText,
-            targetNativeScript: targetPair.native,
-            targetPhoneticSpeak: targetPair.speak,
-            grammarTip: "Tap Listen Slowly (0.78x) to hear every syllable clearly, then tap Practice Speaking!"
-        )
+        let list = bank[topic] ?? bank[.greetings]!
+        return list[index % list.count]
     }
 
     private static func extractSpeakableFromDisplay(_ displayText: String) -> String {
