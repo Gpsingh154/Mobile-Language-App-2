@@ -2405,6 +2405,8 @@ public final class VoicePipelineManager: ObservableObject {
             )
             lastLatencyMetrics = metrics
             events.send(.turnCompleted(metrics))
+            lastTranscript = ""
+            streamingResponseText = ""
             transition(to: .uninitialized)
         } catch {
             audioIO.stop()
@@ -2644,6 +2646,8 @@ public final class VoicePipelineManager: ObservableObject {
                 )
                 self.lastLatencyMetrics = metrics
                 self.events.send(.turnCompleted(metrics))
+                self.lastTranscript = ""
+                self.streamingResponseText = ""
                 self.transition(to: .listening)
             } catch is CancellationError {
                 self.audioIO.setPlaybackCaptureGate(active: false)

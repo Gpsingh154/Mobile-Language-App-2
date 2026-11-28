@@ -14,6 +14,7 @@ struct VoiceAssistantView: View {
 
     @State private var showModelSetup = false
     @State private var showSettings = false
+    @State private var showTypeInput = false
 
     private var isActiveSession: Bool {
         switch viewModel.pipelineState {
@@ -87,6 +88,15 @@ struct VoiceAssistantView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView(assetStore: assetStore) {
                     viewModel.rebuildPipelineManager()
+                }
+            }
+            .sheet(isPresented: $showTypeInput) {
+                TypeInputSheet(
+                    inputLanguage: assetStore.inputLanguage,
+                    outputLanguage: assetStore.outputLanguage,
+                    interactionMode: assetStore.interactionMode
+                ) { typedText in
+                    viewModel.submitTypedTurn(typedText)
                 }
             }
         }
@@ -271,6 +281,9 @@ struct VoiceAssistantView: View {
                             isBusy: isActiveSession || viewModel.replayingTurnID != nil,
                             onReplay: {
                                 viewModel.replayTurn(turn)
+                            },
+                            onDelete: {
+                                viewModel.deleteTurn(turn)
                             }
                         )
                         .id(turn.id)
@@ -347,17 +360,30 @@ struct VoiceAssistantView: View {
             .tint(.cyan)
             .disabled(isActiveSession || viewModel.replayingTurnID != nil)
 
-            HStack(spacing: 18) {
+            HStack(spacing: 12) {
                 Button {
                     viewModel.clearConversation()
                 } label: {
                     Image(systemName: "trash")
                         .font(.title3)
-                        .frame(width: 48, height: 48)
+                        .frame(width: 46, height: 46)
                 }
                 .buttonStyle(.bordered)
                 .clipShape(Circle())
                 .disabled(viewModel.history.isEmpty && viewModel.liveUserTranscript.isEmpty)
+
+                Button {
+                    showTypeInput = true
+                } label: {
+                    Image(systemName: "keyboard")
+                        .font(.title3)
+                        .frame(width: 46, height: 46)
+                }
+                .buttonStyle(.bordered)
+                .tint(.cyan)
+                .clipShape(Circle())
+                .disabled(isActiveSession || viewModel.replayingTurnID != nil)
+                .accessibilityLabel("Type text input")
 
                 Button {
                     viewModel.toggleListening()
@@ -494,19 +520,35 @@ private struct TurnCardView: View {
     let isReplaying: Bool
     let isBusy: Bool
     let onReplay: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 if !turn.userNativeTranscript.isEmpty {
                     Text(turn.userNativeTranscript)
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.cyan)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Spacer()
                 }
 
+                Text(turn.assistantRomanisedText)
+                    .font(.body)
+                    .foregroundStyle(.white)
+
+                if let metrics = turn.metrics {
+                    HStack(spacing: 10) {
+                        Text("ASR \(Int(metrics.asrDecodeMs))ms")
+                        Text("TTFT \(Int(metrics.llmFirstTokenMs))ms")
+                        Text("TTS \(Int(metrics.ttsFirstClauseMs))ms")
+                        Text("Total \(Int(metrics.totalTurnMs))ms")
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(spacing: 12) {
                 if !turn.assistantRomanisedText.isEmpty {
                     Button(action: onReplay) {
                         Image(systemName: isReplaying ? "speaker.wave.3.fill" : "play.circle.fill")
@@ -517,26 +559,351 @@ private struct TurnCardView: View {
                     .disabled(isBusy)
                     .accessibilityLabel("Replay pronunciation")
                 }
-            }
 
-            Text(turn.assistantRomanisedText)
-                .font(.body)
-                .foregroundStyle(.white)
-
-            if let metrics = turn.metrics {
-                HStack(spacing: 10) {
-                    Text("ASR \(Int(metrics.asrDecodeMs))ms")
-                    Text("TTFT \(Int(metrics.llmFirstTokenMs))ms")
-                    Text("TTS \(Int(metrics.ttsFirstClauseMs))ms")
-                    Text("Total \(Int(metrics.totalTurnMs))ms")
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.subheadline)
+                        .foregroundStyle(.red.opacity(0.85))
+                        .padding(6)
+                        .background(Color.white.opacity(0.06), in: Circle())
                 }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Delete turn")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+// MARK: - Language-Mapped Text Input & Built-in Indic Keypad
+
+private struct TypeInputSheet: View {
+    let inputLanguage: PipelineLanguage
+    let outputLanguage: PipelineLanguage
+    let interactionMode: AssistantInteractionMode
+    let onSubmit: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String = ""
+    @State private var useBuiltInIndicKeypad: Bool = false
+    @State private var activeTabIndex: Int = 0 // 0: Consonants, 1: Vowels & Matras
+
+    private var hasSystemKeyboardForLanguage: Bool {
+        if inputLanguage == .english || inputLanguage == .auto { return true }
+        return UITextInputMode.activeInputModes.contains { mode in
+            mode.primaryLanguage?.lowercased().hasPrefix(inputLanguage.rawValue) == true
+        }
+    }
+
+    private var supportsBuiltInKeypad: Bool {
+        inputLanguage != .english && inputLanguage != .auto
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                HStack {
+                    Label("\(inputLanguage.shortChipLabel) → \(outputLanguage.displayName)", systemImage: "character.bubble")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.cyan)
+                    Spacer()
+                    Text(interactionMode.shortTitle)
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.indigo.opacity(0.35), in: Capsule())
+                }
+                .padding(.horizontal)
+
+                LanguageMappedTextField(
+                    text: $text,
+                    placeholder: "Type in \(inputLanguage.displayName)...",
+                    languageCode: inputLanguage.rawValue,
+                    disableSystemKeyboard: useBuiltInIndicKeypad,
+                    onSubmit: submitAndClose
+                )
+                .frame(height: 52)
+                .padding(.horizontal, 12)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal)
+
+                if supportsBuiltInKeypad {
+                    HStack(spacing: 10) {
+                        Button {
+                            useBuiltInIndicKeypad.toggle()
+                        } label: {
+                            Label(
+                                useBuiltInIndicKeypad ? "Switch to iOS System Keyboard" : "Open \(inputLanguage.displayName) Keypad",
+                                systemImage: "keyboard"
+                            )
+                            .font(.caption.weight(.medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.cyan)
+
+                        Spacer()
+
+                        Button {
+                            submitAndClose()
+                        } label: {
+                            Label("Send", systemImage: "paperplane.fill")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.indigo)
+                        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding(.horizontal)
+                } else {
+                    HStack {
+                        Spacer()
+                        Button {
+                            submitAndClose()
+                        } label: {
+                            Label("Send", systemImage: "paperplane.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 12)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.indigo)
+                        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding(.horizontal)
+                }
+
+                if useBuiltInIndicKeypad && supportsBuiltInKeypad {
+                    IndicKeypadView(
+                        language: inputLanguage,
+                        activeTabIndex: $activeTabIndex,
+                        onInsert: { char in text.append(char) },
+                        onBackspace: {
+                            if !text.isEmpty { text.removeLast() }
+                        },
+                        onSpace: { text.append(" ") },
+                        onSubmit: submitAndClose
+                    )
+                }
+
+                Spacer()
+            }
+            .padding(.top, 12)
+            .background(Color(red: 0.06, green: 0.08, blue: 0.14).ignoresSafeArea())
+            .navigationTitle("Type in \(inputLanguage.displayName)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .onAppear {
+                // Automatically pop up the built-in language keypad if iOS doesn't have this language keyboard enabled in Settings
+                if supportsBuiltInKeypad && !hasSystemKeyboardForLanguage {
+                    useBuiltInIndicKeypad = true
+                }
+            }
+        }
+        .presentationDetents(useBuiltInIndicKeypad ? [.medium, .large] : [.medium])
+    }
+
+    private func submitAndClose() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        dismiss()
+        onSubmit(trimmed)
+    }
+}
+
+private final class PreferredLanguageUITextField: UITextField {
+    var preferredLanguageCode: String = "en"
+
+    override var textInputMode: UITextInputMode? {
+        let prefix = preferredLanguageCode.lowercased()
+        if prefix != "auto" {
+            if let matched = UITextInputMode.activeInputModes.first(where: {
+                $0.primaryLanguage?.lowercased().hasPrefix(prefix) == true
+            }) {
+                return matched
+            }
+        }
+        return super.textInputMode
+    }
+}
+
+private struct LanguageMappedTextField: UIViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let languageCode: String
+    let disableSystemKeyboard: Bool
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> PreferredLanguageUITextField {
+        let tf = PreferredLanguageUITextField()
+        tf.preferredLanguageCode = languageCode
+        tf.delegate = context.coordinator
+        tf.textColor = .white
+        tf.tintColor = .systemCyan
+        tf.font = .preferredFont(forTextStyle: .body)
+        tf.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: UIColor.lightGray]
+        )
+        tf.returnKeyType = .send
+        tf.addTarget(context.coordinator, action: #selector(Coordinator.textDidChange(_:)), for: .editingChanged)
+        return tf
+    }
+
+    func updateUIView(_ uiView: PreferredLanguageUITextField, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+        let langChanged = (uiView.preferredLanguageCode != languageCode)
+        let inputModeChanged = ((uiView.inputView != nil) != disableSystemKeyboard)
+        uiView.preferredLanguageCode = languageCode
+
+        if inputModeChanged {
+            uiView.inputView = disableSystemKeyboard ? UIView() : nil
+        }
+        if langChanged || inputModeChanged {
+            uiView.reloadInputViews()
+        }
+        if !disableSystemKeyboard && !uiView.isFirstResponder {
+            DispatchQueue.main.async {
+                uiView.becomeFirstResponder()
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: LanguageMappedTextField
+        init(_ parent: LanguageMappedTextField) { self.parent = parent }
+
+        @objc func textDidChange(_ sender: UITextField) {
+            parent.text = sender.text ?? ""
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            parent.onSubmit()
+            return true
+        }
+    }
+}
+
+private struct IndicKeypadView: View {
+    let language: PipelineLanguage
+    @Binding var activeTabIndex: Int
+    let onInsert: (String) -> Void
+    let onBackspace: () -> Void
+    let onSpace: () -> Void
+    let onSubmit: () -> Void
+
+    private var scriptPalette: (consonants: [String], vowelsAndMatras: [String]) {
+        switch language {
+        case .punjabi:
+            return (
+                ["ਕ","ਖ","ਗ","ਘ","ਙ","ਚ","ਛ","ਜ","ਝ","ਞ","ਟ","ਠ","ਡ","ਢ","ਣ","ਤ","ਥ","ਦ","ਧ","ਨ","ਪ","ਫ","ਬ","ਭ","ਮ","ਯ","ਰ","ਲ","ਵ","ਸ਼","ਸ","ਹ","ੜ","ਖ਼","ਗ਼","ਜ਼","ਫ਼"],
+                ["ਅ","ਆ","ਇ","ਈ","ਉ","ਊ","ਏ","ਐ","ਓ","ਔ","ਾ","ਿ","ੀ","ੁ","ੂ","ੇ","ੈ","ੋ","ੌ","ੰ","ਂ","ੱ","੍","।"]
+            )
+        case .hindi, .marathi:
+            return (
+                ["क","ख","ग","घ","च","छ","ज","झ","ट","ठ","ड","ढ","ण","त","थ","द","ध","न","प","फ","ब","भ","म","य","र","ल","व","श","ष","स","ह","ळ","ड़","ढ़","ज़","फ़"],
+                ["अ","आ","इ","ई","उ","ऊ","ए","ऐ","ओ","औ","ा","ि","ी","ु","ू","े","ै","ो","ौ","ं","ँ","्","ः","।"]
+            )
+        case .bengali:
+            return (
+                ["ক","খ","গ","ঘ","ঙ","চ","ছ","জ","ঝ","ঞ","ট","ঠ","ড","ঢ","ণ","ত","থ","দ","ধ","ন","প","ফ","ব","ভ","ম","য","র","ল","শ","ষ","স","হ","ড়","ঢ়","য়","ৎ"],
+                ["অ","আ","ই","ঈ","উ","ঊ","এ","ঐ","ও","ঔ","া","ি","ী","ু","ূ","ে","ৈ","ো","ৌ","ং","ঁ","্","ঃ","।"]
+            )
+        case .tamil:
+            return (
+                ["க","ங","ச","ஞ","ட","ண","த","ந","ப","ம","ய","ர","ல","வ","ழ","ள","ற","ன","ஜ","ஷ","ஸ","ஹ"],
+                ["அ","ஆ","இ","ஈ","உ","ஊ","எ","ஏ","ஐ","ஒ","ஓ","ஔ","ா","ி","ீ","ு","ூ","ெ","ே","ை","ொ","ோ","ௌ","்","ஃ"]
+            )
+        case .telugu:
+            return (
+                ["క","ఖ","గ","ఘ","చ","ఛ","జ","ఝ","ట","ఠ","డ","ఢ","ణ","త","థ","ద","ధ","న","ప","ఫ","బ","భ","మ","య","ర","ల","వ","శ","ష","స","హ","ళ"],
+                ["అ","ఆ","ఇ","ఈ","ఉ","ఊ","ఎ","ఏ","ఐ","ఒ","ఓ","ఔ","ా","ి","ీ","ు","ూ","ె","ే","ై","ొ","ో","ౌ","ం","్","ః"]
+            )
+        case .gujarati:
+            return (
+                ["ક","ખ","ગ","ઘ","ચ","છ","જ","ઝ","ટ","ઠ","ડ","ઢ","ણ","ત","થ","દ","ધ","ન","પ","ફ","બ","ભ","મ","ય","ર","લ","વ","શ","ષ","સ","હ","ળ"],
+                ["અ","આ","ઇ","ઈ","ઉ","ઊ","એ","ઐ","ઓ","ઔ","ા","િ","ી","ુ","ૂ","ે","ૈ","ો","ૌ","ં","્","ઃ"]
+            )
+        case .kannada:
+            return (
+                ["ಕ","ಖ","ಗ","ಘ","ಚ","ಛ","ಜ","ಝ","ಟ","ಠ","ಡ","ಢ","ಣ","ತ","ಥ","ದ","ಧ","ನ","ಪ","ಫ","ಬ","ಭ","ಮ","ಯ","ರ","ಲ","ವ","ಶ","ಷ","ಸ","ಹ","ಳ"],
+                ["ಅ","ಆ","ಇ","ಈ","ಉ","ಊ","ಎ","ಏ","ಐ","ಒ","ಓ","ಔ","ಾ","ಿ","ೀ","ು","ೂ","ೆ","ೇ","ೈ","ೊ","ೋ","ೌ","ಂ","್","ಃ"]
+            )
+        default:
+            return ([], [])
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Picker("Characters", selection: $activeTabIndex) {
+                Text("Consonants").tag(0)
+                Text("Vowels & Matras").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+
+            let keys = (activeTabIndex == 0) ? scriptPalette.consonants : scriptPalette.vowelsAndMatras
+            let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: 8)
+
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 6) {
+                    ForEach(keys, id: \.self) { ch in
+                        Button {
+                            onInsert(ch)
+                        } label: {
+                            Text(ch)
+                                .font(.title3)
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity, minHeight: 38)
+                                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+            }
+            .frame(maxHeight: 220)
+
+            HStack(spacing: 8) {
+                Button(action: onSpace) {
+                    Text("Space")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
+                        .foregroundStyle(.white)
+                }
+
+                Button(action: onBackspace) {
+                    Image(systemName: "delete.left.fill")
+                        .font(.title3)
+                        .frame(width: 64, height: 40)
+                        .background(Color.red.opacity(0.28), in: RoundedRectangle(cornerRadius: 9))
+                        .foregroundStyle(.white)
+                }
+
+                Button(action: onSubmit) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.title3)
+                        .frame(width: 64, height: 40)
+                        .background(Color.indigo, in: RoundedRectangle(cornerRadius: 9))
+                        .foregroundStyle(.white)
+                }
+            }
+            .padding(.horizontal, 10)
+        }
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 8)
     }
 }
 

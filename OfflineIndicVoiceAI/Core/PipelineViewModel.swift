@@ -132,6 +132,33 @@ public final class PipelineViewModel: ObservableObject {
         lastMetrics = nil
     }
 
+    public func deleteTurn(_ turn: ConversationTurn) {
+        Haptics.tap()
+        history.removeAll { $0.id == turn.id }
+    }
+
+    public func submitTypedTurn(_ rawText: String) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        Haptics.tap()
+        guard let manager else {
+            rebuildPipelineManager()
+            return
+        }
+        let inputLang = assetStore.inputLanguage
+        let outputLang = assetStore.outputLanguage
+        let mode = assetStore.interactionMode
+        let fallbackResp = Self.fallbackReply(for: outputLang, mode: mode)
+
+        Task {
+            await manager.updateLanguageSettings(input: inputLang, output: outputLang, mode: mode)
+            await manager.runSampleTurn(
+                nativeInput: text,
+                fallbackRomanResponse: fallbackResp
+            )
+        }
+    }
+
     /// Triggers a sample utterance matching ANY selected (Input -> Output) language pair and mode, speaking it aloud via Kokoro TTS.
     public func runMockSampleTurn() {
         Haptics.tap()
@@ -247,6 +274,8 @@ public final class PipelineViewModel: ObservableObject {
                             )
                         )
                     }
+                    self.liveUserTranscript = ""
+                    self.liveAssistantText = ""
                 case .memoryPressureTriggered(let availMB):
                     self.availableMemoryMB = availMB
                 default:
