@@ -1180,15 +1180,28 @@ private struct TeacherSessionView: View {
                 }
 
                 if viewModel.teacherIsListening {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 10, height: 10)
-                        Text(viewModel.teacherListeningLabel)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
+                    VStack(spacing: 4) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 10, height: 10)
+                            Text(viewModel.teacherListeningLabel)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                        }
+                        if !viewModel.teacherLiveTranscript.isEmpty {
+                            Text(viewModel.teacherLiveTranscript)
+                                .font(.caption)
+                                .foregroundStyle(.cyan)
+                                .multilineTextAlignment(.center)
+                        } else {
+                            Text("Speak clearly, then pause 1.5s or tap Stop & Send")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.vertical, 6)
+                    .padding(.horizontal)
                 }
 
                 // Interactive Teacher Controls
@@ -1198,7 +1211,7 @@ private struct TeacherSessionView: View {
                             viewModel.toggleTeacherMic(practicingTarget: false)
                         } label: {
                             Label(
-                                viewModel.teacherIsListening ? "Stop Mic" : "Ask in \(knownLanguage.displayName)",
+                                viewModel.teacherIsListening ? "Stop & Send" : "Ask in \(knownLanguage.displayName)",
                                 systemImage: viewModel.teacherIsListening ? "stop.fill" : "mic.fill"
                             )
                             .font(.caption.weight(.semibold))
@@ -1214,7 +1227,7 @@ private struct TeacherSessionView: View {
                             viewModel.toggleTeacherMic(practicingTarget: true)
                         } label: {
                             Label(
-                                viewModel.teacherIsListening ? "Stop Mic" : "Practice \(targetLanguage.displayName)",
+                                viewModel.teacherIsListening ? "Stop & Score" : "Practice \(targetLanguage.displayName)",
                                 systemImage: "waveform.badge.mic"
                             )
                             .font(.caption.weight(.semibold))

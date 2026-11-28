@@ -50,6 +50,7 @@ public final class PipelineViewModel: ObservableObject {
     @Published public private(set) var teacherIsSpeaking: Bool = false
     @Published public private(set) var teacherIsListening: Bool = false
     @Published public private(set) var teacherListeningLabel: String = ""
+    @Published public private(set) var teacherLiveTranscript: String = ""
     @Published public private(set) var teacherCurrentLesson: TeacherTurnResult?
     @Published public private(set) var teacherLastEvaluation: TeacherPracticeEvaluation?
     @Published public private(set) var teacherLastLearnerInput: String = ""
@@ -252,28 +253,36 @@ public final class PipelineViewModel: ObservableObject {
 
     public func toggleTeacherMic(practicingTarget: Bool) {
         Haptics.tap()
-        cancelTeacherSpeech()
         guard let manager else { return }
 
         if teacherIsListening {
-            teacherCaptureTask?.cancel()
-            teacherCaptureTask = nil
-            teacherIsListening = false
-            teacherListeningLabel = ""
+            // Finish cleanly without cancelling so buffered VAD audio is flushed and returned intact.
+            teacherListeningLabel = "Processing speech..."
             Task {
-                await manager.stopTeacherCapture()
+                await manager.finishTeacherCapture()
             }
             return
         }
 
+        let previousSpeech = teacherSpeechTask
+        teacherSpeechTask?.cancel()
+        teacherSpeechTask = nil
+        teacherIsSpeaking = false
+
         let listenLang = practicingTarget ? assetStore.outputLanguage : assetStore.inputLanguage
         teacherIsListening = true
+        teacherLiveTranscript = ""
         teacherListeningLabel = practicingTarget
             ? "Repeat in \(assetStore.outputLanguage.displayName)..."
             : "Speak in \(assetStore.inputLanguage.displayName)..."
         teacherErrorMessage = nil
 
         teacherCaptureTask = Task {
+            await previousSpeech?.value
+            await manager.cancelTeacherPlayback()
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled else { return }
+
             do {
                 let transcript = try await manager.captureSingleTeacherUtterance(inputLanguage: listenLang)
                 self.teacherIsListening = false
@@ -310,9 +319,16 @@ public final class PipelineViewModel: ObservableObject {
 
     public func replayTeacherAudio(slow: Bool) {
         Haptics.tap()
-        guard let speakText = teacherCurrentLesson?.targetPhoneticSpeak, !speakText.isEmpty else { return }
+        guard let lesson = teacherCurrentLesson,
+              !lesson.targetPhoneticSpeak.isEmpty || !lesson.targetNativeScript.isEmpty else { return }
         let speed: Float = slow ? 0.78 : Float(assetStore.ttsSpeed)
-        playTeacherClauses([speakText], speedOverride: speed)
+        let targetLang = (assetStore.outputLanguage == .auto) ? PipelineLanguage.english : assetStore.outputLanguage
+        let seg = TeacherSpeechSegment(
+            nativeText: lesson.targetNativeScript,
+            phoneticFallback: lesson.targetPhoneticSpeak,
+            language: targetLang
+        )
+        playTeacherSegments([seg], speedOverride: speed)
     }
 
     public func cancelTeacherSpeech() {
@@ -332,6 +348,7 @@ public final class PipelineViewModel: ObservableObject {
         teacherCaptureTask = nil
         teacherIsListening = false
         teacherListeningLabel = ""
+        teacherLiveTranscript = ""
         Task {
             await manager?.cancelTeacherPlayback()
             await manager?.stopTeacherCapture()
@@ -343,8 +360,8 @@ public final class PipelineViewModel: ObservableObject {
     }
 
     private func loadInstantLessonAndSpeak(includeBilingualGuidance: Bool) {
-        let nativeLang = assetStore.inputLanguage
-        let targetLang = assetStore.outputLanguage
+        let nativeLang = (assetStore.inputLanguage == .auto) ? PipelineLanguage.punjabi : assetStore.inputLanguage
+        let targetLang = (assetStore.outputLanguage == .auto) ? PipelineLanguage.english : assetStore.outputLanguage
         let lesson = VoicePipelineManager.instantTeacherLesson(
             topic: teacherTopic,
             nativeLanguage: nativeLang,
@@ -355,22 +372,34 @@ public final class PipelineViewModel: ObservableObject {
         teacherIsBusy = false
         teacherErrorMessage = nil
 
-        var clauses: [String] = []
+        var segments: [TeacherSpeechSegment] = []
         if includeBilingualGuidance {
             let guidance = VoicePipelineManager.teacherGuidance(
                 topic: teacherTopic,
                 nativeLanguage: nativeLang,
                 targetLanguage: targetLang
             )
-            clauses.append(guidance.speakEnglish)
+            segments.append(TeacherSpeechSegment(
+                nativeText: guidance.speakEnglish,
+                phoneticFallback: guidance.speakEnglish,
+                language: .english
+            ))
             if let knownSpeak = guidance.speakKnown, !knownSpeak.isEmpty {
-                clauses.append(knownSpeak)
+                segments.append(TeacherSpeechSegment(
+                    nativeText: guidance.displayKnown ?? knownSpeak,
+                    phoneticFallback: knownSpeak,
+                    language: nativeLang
+                ))
             }
         }
-        if !lesson.targetPhoneticSpeak.isEmpty {
-            clauses.append(lesson.targetPhoneticSpeak)
+        if !lesson.targetPhoneticSpeak.isEmpty || !lesson.targetNativeScript.isEmpty {
+            segments.append(TeacherSpeechSegment(
+                nativeText: lesson.targetNativeScript,
+                phoneticFallback: lesson.targetPhoneticSpeak,
+                language: targetLang
+            ))
         }
-        playTeacherClauses(clauses, speedOverride: Float(assetStore.ttsSpeed))
+        playTeacherSegments(segments, speedOverride: Float(assetStore.ttsSpeed))
     }
 
     private func requestTeacherTranslation(learnerInput: String) {
@@ -379,8 +408,8 @@ public final class PipelineViewModel: ObservableObject {
         teacherIsBusy = true
         teacherErrorMessage = nil
         let topic = teacherTopic
-        let nativeLang = assetStore.inputLanguage
-        let targetLang = assetStore.outputLanguage
+        let nativeLang = (assetStore.inputLanguage == .auto) ? PipelineLanguage.punjabi : assetStore.inputLanguage
+        let targetLang = (assetStore.outputLanguage == .auto) ? PipelineLanguage.english : assetStore.outputLanguage
         let idx = teacherChallengeIndex
 
         Task {
@@ -394,24 +423,31 @@ public final class PipelineViewModel: ObservableObject {
             self.teacherCurrentLesson = lesson
             self.teacherIsBusy = false
             self.teacherPracticeCount += 1
-            if !lesson.targetPhoneticSpeak.isEmpty {
-                self.playTeacherClauses([lesson.targetPhoneticSpeak], speedOverride: Float(assetStore.ttsSpeed))
+            if !lesson.targetPhoneticSpeak.isEmpty || !lesson.targetNativeScript.isEmpty {
+                let seg = TeacherSpeechSegment(
+                    nativeText: lesson.targetNativeScript,
+                    phoneticFallback: lesson.targetPhoneticSpeak,
+                    language: targetLang
+                )
+                self.playTeacherSegments([seg], speedOverride: Float(assetStore.ttsSpeed))
             }
         }
     }
 
-    private func playTeacherClauses(_ clauses: [String], speedOverride: Float) {
+    private func playTeacherSegments(_ segments: [TeacherSpeechSegment], speedOverride: Float) {
+        let prevTask = teacherSpeechTask
         teacherSpeechTask?.cancel()
         teacherSpeechTask = nil
-        guard let manager, !clauses.isEmpty else {
+        guard let manager, !segments.isEmpty else {
             teacherIsSpeaking = false
             return
         }
         teacherIsSpeaking = true
         teacherSpeechTask = Task {
+            await prevTask?.value
             await manager.cancelTeacherPlayback()
             if !Task.isCancelled {
-                await manager.speakTeacherSequence(clauses, speedOverride: speedOverride)
+                await manager.speakTeacherSegments(segments, speedOverride: speedOverride)
             }
             if !Task.isCancelled {
                 self.teacherIsSpeaking = false
@@ -480,6 +516,10 @@ public final class PipelineViewModel: ObservableObject {
         manager.$streamingResponseText
             .receive(on: DispatchQueue.main)
             .assign(to: &$liveAssistantText)
+
+        manager.$teacherLiveTranscript
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$teacherLiveTranscript)
 
         manager.events
             .receive(on: DispatchQueue.main)

@@ -913,14 +913,16 @@ public final class AudioPipelineIO: @unchecked Sendable {
 
             let session = AVAudioSession.sharedInstance()
             do {
-                try session.setCategory(.playback, mode: .spokenAudio, options: [])
+                try session.setCategory(.playback, mode: .default, options: [])
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             } catch {
                 // Fallback to playAndRecord defaultToSpeaker if hardware refuses direct .playback switch
-                try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetooth])
+                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             }
 
+            playerNode.volume = 1.0
+            audioEngine.mainMixerNode.outputVolume = 1.0
             audioEngine.attach(playerNode)
             audioEngine.connect(
                 playerNode,
@@ -1480,6 +1482,7 @@ public protocol ASREngineProtocol: Actor {
     func initialize() async throws
     func updateInputLanguage(_ language: PipelineLanguage, legacyMode: VoicePipelineConfiguration.ScriptDisplayMode)
     func processPCMChunk(_ chunk: PCM16kChunk) async throws -> [ASREvent]
+    func flushPendingSpeech() async throws -> [ASREvent]
     func resetVAD()
     func unloadModel() async
 }
@@ -1627,25 +1630,12 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
         isLoaded = true
     }
 
-    public func processPCMChunk(_ chunk: PCM16kChunk) async throws -> [ASREvent] {
-        guard isLoaded else {
-            throw VoicePipelineError.engineNotInitialized("SherpaIndicConformerASR")
-        }
-
-        // Reuse floatScratchBuffer across callbacks to avoid GC/ARC churn.
-        chunk.copyNormalizedFloat32(into: &floatScratchBuffer)
+    #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
+    private func drainCompletedVADSegments(
+        vad: SherpaOnnxVoiceActivityDetectorWrapper,
+        recognizer: SherpaOnnxOfflineRecognizer
+    ) async -> [ASREvent] {
         var events: [ASREvent] = []
-
-        #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
-        guard let vad, let recognizer else { return events }
-        vad.acceptWaveform(samples: floatScratchBuffer)
-
-        let speechNow = vad.isSpeechDetected()
-        if speechNow && !isCurrentlyInSpeech {
-            isCurrentlyInSpeech = true
-            events.append(.speechStarted)
-        }
-
         while !vad.isEmpty() {
             let segment = vad.front()
             let samples = segment.samples
@@ -1679,6 +1669,31 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
                 events.append(.utteranceFinalized(transcript: finalText, durationSeconds: duration, decodeMs: decodeMs))
             }
         }
+        return events
+    }
+    #endif
+
+    public func processPCMChunk(_ chunk: PCM16kChunk) async throws -> [ASREvent] {
+        guard isLoaded else {
+            throw VoicePipelineError.engineNotInitialized("SherpaIndicConformerASR")
+        }
+
+        // Reuse floatScratchBuffer across callbacks to avoid GC/ARC churn.
+        chunk.copyNormalizedFloat32(into: &floatScratchBuffer)
+        var events: [ASREvent] = []
+
+        #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
+        guard let vad, let recognizer else { return events }
+        vad.acceptWaveform(samples: floatScratchBuffer)
+
+        let speechNow = vad.isSpeechDetected()
+        if speechNow && !isCurrentlyInSpeech {
+            isCurrentlyInSpeech = true
+            events.append(.speechStarted)
+        }
+
+        let drained = await drainCompletedVADSegments(vad: vad, recognizer: recognizer)
+        events.append(contentsOf: drained)
         #else
         // Structural energy-based mock VAD + sample Gurmukhi utterance trigger for integration testing.
         var rms: Float = 0
@@ -1711,6 +1726,17 @@ public actor SherpaIndicConformerASR: ASREngineProtocol {
         #endif
 
         return events
+    }
+
+    public func flushPendingSpeech() async throws -> [ASREvent] {
+        guard isLoaded else { return [] }
+        #if canImport(SherpaOnnx) || canImport(sherpa_onnx) || SHERPA_ONNX_ENABLED
+        guard let vad, let recognizer else { return [] }
+        vad.flush()
+        return await drainCompletedVADSegments(vad: vad, recognizer: recognizer)
+        #else
+        return []
+        #endif
     }
 
     public func resetVAD() {
@@ -1971,11 +1997,161 @@ public protocol KokoroPhonemizerProtocol: Sendable {
     func phonemizeAndTokenize(_ text: String, maxTokens: Int) throws -> [Int64]
 }
 
-/// Structural phonemizer translating Romanised Indian/English prose into IPA token IDs
-/// loaded from Kokoro's `vocab.json`. Replace/back `espeak-ng` or Misaki C-bridge for
-/// production phoneme accuracy.
+public struct TeacherSpeechSegment: Sendable {
+    public let nativeText: String
+    public let phoneticFallback: String
+    public let language: PipelineLanguage
+
+    public init(nativeText: String, phoneticFallback: String, language: PipelineLanguage) {
+        self.nativeText = nativeText
+        self.phoneticFallback = phoneticFallback
+        self.language = language
+    }
+}
+
+/// Offline system speech bridge for clear native pronunciation using on-device iOS voices
+/// (`AVSpeechSynthesizer`) whenever available for the selected language, leaving Indic
+/// languages without an installed system voice to fall back onto Kokoro 82M.
+@MainActor
+public final class AppleOfflineTTSBridge: NSObject, AVSpeechSynthesizerDelegate {
+    private let synthesizer = AVSpeechSynthesizer()
+    private var pendingContinuation: CheckedContinuation<Void, Never>?
+
+    public override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
+
+    public static func bestVoice(for language: PipelineLanguage) -> AVSpeechSynthesisVoice? {
+        let prefixes: [String]
+        switch language {
+        case .english, .auto:
+            prefixes = ["en-IN", "en-US", "en-GB", "en"]
+        case .punjabi:
+            prefixes = ["pa-IN", "pa"]
+        case .hindi:
+            prefixes = ["hi-IN", "hi"]
+        case .bengali:
+            prefixes = ["bn-IN", "bn-BD", "bn"]
+        case .tamil:
+            prefixes = ["ta-IN", "ta"]
+        case .telugu:
+            prefixes = ["te-IN", "te"]
+        case .marathi:
+            prefixes = ["mr-IN", "mr"]
+        case .gujarati:
+            prefixes = ["gu-IN", "gu"]
+        case .kannada:
+            prefixes = ["kn-IN", "kn"]
+        }
+
+        let allVoices = AVSpeechSynthesisVoice.speechVoices()
+        for prefix in prefixes {
+            let matching = allVoices.filter {
+                $0.language.caseInsensitiveCompare(prefix) == .orderedSame ||
+                $0.language.lowercased().hasPrefix(prefix.lowercased())
+            }
+            if !matching.isEmpty {
+                return matching.sorted { $0.quality.rawValue > $1.quality.rawValue }.first
+            }
+        }
+        if language == .english || language == .auto {
+            return AVSpeechSynthesisVoice(language: "en-IN") ?? AVSpeechSynthesisVoice(language: "en-US")
+        }
+        return nil
+    }
+
+    public func cancel() {
+        if synthesizer.isSpeaking || synthesizer.isPaused {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+        let cont = pendingContinuation
+        pendingContinuation = nil
+        cont?.resume()
+    }
+
+    public func speakAndWait(_ text: String, voice: AVSpeechSynthesisVoice, speed: Float) async {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+
+        cancel()
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                self.pendingContinuation = continuation
+
+                let session = AVAudioSession.sharedInstance()
+                try? session.setCategory(.playback, mode: .default, options: [.duckOthers])
+                try? session.setActive(true, options: .notifyOthersOnDeactivation)
+
+                let utterance = AVSpeechUtterance(string: clean)
+                utterance.voice = voice
+                utterance.volume = 1.0
+                utterance.pitchMultiplier = 1.0
+                // Map app speed (0.78 slow, 1.0 normal) cleanly onto AVSpeechUtterance rate.
+                let normalizedFactor: Float = (speed <= 0.85) ? 0.80 : min(1.12, max(0.85, speed))
+                let rawRate = AVSpeechUtteranceDefaultSpeechRate * normalizedFactor * 0.96
+                utterance.rate = min(
+                    AVSpeechUtteranceMaximumSpeechRate,
+                    max(AVSpeechUtteranceMinimumSpeechRate, rawRate)
+                )
+                synthesizer.speak(utterance)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancel()
+            }
+        }
+    }
+
+    nonisolated public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            let cont = self?.pendingContinuation
+            self?.pendingContinuation = nil
+            cont?.resume()
+        }
+    }
+
+    nonisolated public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            let cont = self?.pendingContinuation
+            self?.pendingContinuation = nil
+            cont?.resume()
+        }
+    }
+}
+
+/// IPA-aware phonemizer converting English prose and Romanised Indian text into
+/// Kokoro-82M `vocab.json` IPA token IDs with dynamic key checks so consonants like
+/// `c`, `g` (`ɡ`), `y` (`j`), `r` (`ɹ`), and English digraphs are pronounced clearly.
 public struct IndicRomanKokoroPhonemizer: KokoroPhonemizerProtocol {
     private let vocab: [String: Int64]
+
+    private static let englishLexicon: [String: String] = [
+        "welcome": "wˈɛlkəm", "to": "tə", "greetings": "ɡɹˈiːtɪŋz", "travel": "tɹˈævəl",
+        "food": "fˈuːd", "dining": "dˈaɪnɪŋ", "shopping": "ʃˈɑːpɪŋ", "daily": "dˈeɪli",
+        "chat": "tʃˈæt", "numbers": "nˈʌmbəɹz", "time": "tˈaɪm", "say": "sˈeɪ",
+        "something": "sˈʌmθɪŋ", "in": "ɪn", "using": "jˈuːzɪŋ", "mic": "mˈaɪk",
+        "or": "ɔːɹ", "keyboard": "kˈiːbɔːɹd", "practice": "pɹˈæktɪs", "this": "ðˈɪs",
+        "starter": "stˈɑːɹtəɹ", "phrase": "fɹˈeɪz", "sentence": "sˈɛntəns",
+        "punjabi": "pʌndʒˈɑːbi", "hindi": "hˈɪndi", "english": "ˈɪŋɡlɪʃ",
+        "bengali": "bɛŋɡˈɔːli", "tamil": "tˈæmɪl", "telugu": "tˈɛlʊɡu",
+        "marathi": "məɹˈɑːti", "gujarati": "ɡʊdʒəɹˈɑːti", "kannada": "kˈɑːnədə",
+        "hello": "həˈloʊ", "how": "hˈaʊ", "are": "ɑːɹ", "you": "jˈuː",
+        "i": "ˈaɪ", "am": "æm", "fine": "fˈaɪn", "thank": "θˈæŋk", "thanks": "θˈæŋks",
+        "nice": "nˈaɪs", "meet": "mˈiːt", "where": "wˈɛɹ", "is": "ɪz", "the": "ðə",
+        "train": "tɹˈeɪn", "station": "stˈeɪʃən", "much": "mˈʌtʃ", "ticket": "tˈɪkɪt",
+        "tickets": "tˈɪkɪts", "please": "plˈiːz", "stop": "stˈɑːp", "right": "ɹˈaɪt",
+        "here": "hˈɪɹ", "bring": "bɹˈɪŋ", "some": "sˈʌm", "water": "wˈɔːtəɹ",
+        "very": "vˈɛɹi", "delicious": "dɪˈlɪʃəs", "would": "wˈʊd", "like": "lˈaɪk",
+        "tea": "tˈiː", "does": "dˈʌz", "cost": "kˈɔːst", "can": "kˈæn",
+        "reduce": "ɹɪˈdjuːs", "price": "pɹˈaɪs", "will": "wˈɪl", "take": "tˈeɪk",
+        "one": "wˈʌn", "what": "wˈʌt", "your": "jˈɔːɹ", "name": "nˈeɪm",
+        "learning": "lˈɜːɹnɪŋ", "new": "njˈuː", "language": "lˈæŋɡwɪdʒ",
+        "speak": "spˈiːk", "slowly": "slˈoʊli", "now": "nˈaʊ", "give": "ɡˈɪv",
+        "me": "mˈiː", "two": "tˈuː", "wait": "wˈeɪt", "for": "fɔːɹ", "five": "fˈaɪv",
+        "minutes": "mˈɪnɪts", "great": "ɡɹˈeɪt", "listen": "lˈɪsən", "tap": "tˈæp"
+    ]
 
     public init(vocabJSONPath: String) throws {
         if FileManager.default.fileExists(atPath: vocabJSONPath) {
@@ -1992,22 +2168,21 @@ public struct IndicRomanKokoroPhonemizer: KokoroPhonemizerProtocol {
     }
 
     public func phonemizeAndTokenize(_ text: String, maxTokens: Int = 510) throws -> [Int64] {
-        // Normalize Indian phonetic digraphs toward IPA equivalents before vocab lookup.
-        let normalized = text.lowercased()
-            .replacingOccurrences(of: "aa", with: "ɑː")
-            .replacingOccurrences(of: "ee", with: "iː")
-            .replacingOccurrences(of: "oo", with: "uː")
-            .replacingOccurrences(of: "sh", with: "ʃ")
-            .replacingOccurrences(of: "ch", with: "tʃ")
-            .replacingOccurrences(of: "ng", with: "ŋ")
+        let ipaString = toIPA(text)
 
         var ids: [Int64] = []
-        ids.reserveCapacity(min(normalized.count, maxTokens))
+        ids.reserveCapacity(min(ipaString.count, maxTokens))
 
-        for ch in normalized {
+        for ch in ipaString {
             let key = String(ch)
             if let id = vocab[key] {
                 ids.append(id)
+            } else if ch == "ɡ", let fallback = vocab["g"] {
+                ids.append(fallback)
+            } else if ch == "ɹ", let fallback = vocab["r"] {
+                ids.append(fallback)
+            } else if ch == "j", let fallback = vocab["y"] {
+                ids.append(fallback)
             } else if let asciiFallback = key.folding(options: .diacriticInsensitive, locale: .current).first,
                       let fallbackID = vocab[String(asciiFallback)] {
                 ids.append(fallbackID)
@@ -2019,6 +2194,72 @@ public struct IndicRomanKokoroPhonemizer: KokoroPhonemizerProtocol {
             throw VoicePipelineError.phonemizationFailed(text)
         }
         return ids
+    }
+
+    private func toIPA(_ text: String) -> String {
+        let gChar = (vocab["ɡ"] != nil) ? "ɡ" : "g"
+        let rChar = (vocab["ɹ"] != nil) ? "ɹ" : "r"
+        let jCons = (vocab["j"] != nil) ? "j" : "y"
+        let dzh = (vocab["d"] != nil && vocab["ʒ"] != nil) ? "dʒ" : "j"
+        let thSound = (vocab["θ"] != nil) ? "θ" : "t"
+
+        var out = ""
+        var currentWord = ""
+
+        func flushWord() {
+            guard !currentWord.isEmpty else { return }
+            if let dictIPA = Self.englishLexicon[currentWord] {
+                out.append(dictIPA)
+            } else {
+                var w = currentWord
+                // Digraphs and multi-letter phonetics (order matters: longest match first)
+                let rules: [(String, String)] = [
+                    ("tion", "ʃən"), ("sion", "ʒən"), ("igh", "aɪ"),
+                    ("chh", "tʃ"), ("ch", "tʃ"), ("sh", "ʃ"), ("ph", "f"),
+                    ("qu", "kw"), ("ck", "k"), ("ng", "ŋ"), ("th", thSound),
+                    ("aa", "ɑː"), ("ee", "iː"), ("ii", "iː"), ("oo", "uː"), ("uu", "uː"),
+                    ("ea", "iː"), ("ai", "eɪ"), ("ay", "eɪ"), ("au", "ɔː"),
+                    ("ou", "aʊ"), ("ow", "oʊ"), ("oi", "ɔɪ"), ("oy", "ɔɪ"),
+                    ("kh", "k"), ("gh", gChar), ("bh", "b"), ("dh", "d"),
+                    ("ce", "sɛ"), ("ci", "sɪ"), ("cy", "saɪ")
+                ]
+                for (pat, rep) in rules {
+                    w = w.replacingOccurrences(of: pat, with: rep)
+                }
+                let chars = Array(w)
+                var mapped = ""
+                for idx in chars.indices {
+                    let c = chars[idx]
+                    switch c {
+                    case "c": mapped.append("k")
+                    case "q": mapped.append("k")
+                    case "x": mapped.append("ks")
+                    case "g": mapped.append(gChar)
+                    case "r": mapped.append(rChar)
+                    case "j": mapped.append(dzh)
+                    case "y":
+                        mapped.append(idx == 0 ? jCons : "i")
+                    case "a":
+                        mapped.append("ɑ")
+                    default:
+                        mapped.append(c)
+                    }
+                }
+                out.append(mapped)
+            }
+            currentWord.removeAll(keepingCapacity: true)
+        }
+
+        for ch in text.lowercased() {
+            if ch >= "a" && ch <= "z" {
+                currentWord.append(ch)
+            } else {
+                flushWord()
+                out.append(ch)
+            }
+        }
+        flushWord()
+        return out
     }
 }
 
@@ -2251,7 +2492,7 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
             _ = samples.withUnsafeMutableBytes { dst in
                 rawWaveformData.copyBytes(to: dst)
             }
-            return samples
+            return Self.boostLoudness(samples)
         }
         #elseif canImport(onnxruntime)
         guard let api = ortApi, let ortSession, let voicePack else {
@@ -2342,7 +2583,7 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
 
             guard let outDataPtr, elemCount > 0 else { return [] }
             let floatPtr = outDataPtr.assumingMemoryBound(to: Float.self)
-            return Array(UnsafeBufferPointer(start: floatPtr, count: elemCount))
+            return Self.boostLoudness(Array(UnsafeBufferPointer(start: floatPtr, count: elemCount)))
         }
         #else
         // Structural mock: synthesize short gentle silence/tone proportional to clause length at 24kHz.
@@ -2350,6 +2591,29 @@ public actor KokoroONNXSynthesizer: TTSEngineProtocol {
         let sampleCount = Int(config.outputSampleRate * durationSeconds)
         return [Float](repeating: 0, count: sampleCount)
         #endif
+    }
+
+    private static func boostLoudness(_ samples: [Float]) -> [Float] {
+        guard !samples.isEmpty else { return samples }
+        var peak: Float = 0
+        var rms: Float = 0
+        vDSP_maxmgv(samples, 1, &peak, vDSP_Length(samples.count))
+        vDSP_rmsqv(samples, 1, &rms, vDSP_Length(samples.count))
+        guard peak > 0.0005, rms > 0.0002 else { return samples }
+
+        let targetGain = min(4.5, min(0.24 / rms, 1.35 / peak))
+        guard targetGain > 1.05 else { return samples }
+
+        var boosted = [Float](repeating: 0, count: samples.count)
+        for i in samples.indices {
+            let scaled = samples[i] * targetGain
+            if abs(scaled) <= 0.82 {
+                boosted[i] = scaled
+            } else {
+                boosted[i] = Float(tanh(Double(scaled)))
+            }
+        }
+        return boosted
     }
 
     public func unloadSession() async {
@@ -2389,6 +2653,7 @@ public final class VoicePipelineManager: ObservableObject {
     @Published public private(set) var state: VoicePipelineState = .uninitialized
     @Published public private(set) var lastTranscript: String = ""
     @Published public private(set) var streamingResponseText: String = ""
+    @Published public private(set) var teacherLiveTranscript: String = ""
     @Published public private(set) var availableMemoryMB: Int = MemoryBudgetManager.availableMemoryMB()
     @Published public private(set) var lastLatencyMetrics: TurnLatencyMetrics?
 
@@ -2400,6 +2665,7 @@ public final class VoicePipelineManager: ObservableObject {
     private let asrEngine: ASREngineProtocol
     private let llmBrain: LLMBrainProtocol
     private let ttsEngine: TTSEngineProtocol
+    private let appleTTSBridge = AppleOfflineTTSBridge()
     private var memoryBudgetManager: MemoryBudgetManager?
 
     private var captureLoopTask: Task<Void, Never>?
@@ -2694,6 +2960,7 @@ public final class VoicePipelineManager: ObservableObject {
     private var teacherSingleCaptureTask: Task<String?, Never>?
 
     public func cancelTeacherPlayback() {
+        appleTTSBridge.cancel()
         audioIO.cancelPlaybackImmediately()
         if state == .speaking {
             audioIO.stop()
@@ -2701,48 +2968,76 @@ public final class VoicePipelineManager: ObservableObject {
         }
     }
 
-    /// Speaks a sequence of English/phonetic clauses in one audio playback session (cancellable at any point).
-    public func speakTeacherSequence(_ clauses: [String], speedOverride: Float? = nil) async {
-        let nonEmpty = clauses
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+    /// Speaks bilingual Teacher guidance and target phrases loudly and clearly, using
+    /// Apple's on-device native voice (`en-IN`/`en-US`, and installed Indic voices) when available
+    /// and falling back to IPA-phonemized, loudness-boosted Kokoro 82M.
+    public func speakTeacherSegments(_ segments: [TeacherSpeechSegment], speedOverride: Float? = nil) async {
+        let nonEmpty = segments.filter {
+            !$0.nativeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            !$0.phoneticFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         guard !nonEmpty.isEmpty else { return }
+
+        let activeSpeed = speedOverride ?? config.tts.speed
+        var kokoroSessionOpen = false
 
         do {
             if state == .listening {
                 await stopPipeline()
             }
-            try audioIO.configureForPlaybackOnly()
-            try await ttsEngine.loadSession()
             transition(to: .speaking)
 
-            let activeSpeed = speedOverride ?? config.tts.speed
-            for item in nonEmpty {
+            for seg in nonEmpty {
                 if Task.isCancelled { break }
-                let speakable = Self.extractSpeakableFromDisplay(item)
-                guard !speakable.isEmpty else { continue }
 
-                var chunker = TransliterationStreamChunker()
-                var parts = chunker.append(token: speakable)
-                if let tail = chunker.flush() { parts.append(tail) }
-                if parts.isEmpty { parts = [speakable] }
+                if let nativeVoice = AppleOfflineTTSBridge.bestVoice(for: seg.language) {
+                    if kokoroSessionOpen {
+                        await audioIO.waitForPlaybackDrain()
+                        audioIO.stop()
+                        kokoroSessionOpen = false
+                    }
+                    let spokenText = !seg.nativeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? seg.nativeText
+                        : seg.phoneticFallback
+                    await appleTTSBridge.speakAndWait(spokenText, voice: nativeVoice, speed: activeSpeed)
+                } else {
+                    if !kokoroSessionOpen {
+                        try audioIO.configureForPlaybackOnly()
+                        try await ttsEngine.loadSession()
+                        kokoroSessionOpen = true
+                    }
+                    let speakable = Self.extractSpeakableFromDisplay(
+                        !seg.phoneticFallback.isEmpty ? seg.phoneticFallback : seg.nativeText
+                    )
+                    guard !speakable.isEmpty else { continue }
 
-                for part in parts {
+                    var chunker = TransliterationStreamChunker()
+                    var parts = chunker.append(token: speakable)
+                    if let tail = chunker.flush() { parts.append(tail) }
+                    if parts.isEmpty { parts = [speakable] }
+
+                    for part in parts {
+                        if Task.isCancelled { break }
+                        let samples24k = try await ttsEngine.synthesize(phoneticClause: part, speed: activeSpeed)
+                        if Task.isCancelled { break }
+                        await audioIO.enqueuePlayback(samples24k: samples24k, maxQueuedBuffers: 2)
+                    }
                     if Task.isCancelled { break }
-                    let samples24k = try await ttsEngine.synthesize(phoneticClause: part, speed: activeSpeed)
-                    if Task.isCancelled { break }
-                    await audioIO.enqueuePlayback(samples24k: samples24k, maxQueuedBuffers: 2)
+                    await audioIO.waitForPlaybackDrain()
                 }
-                if Task.isCancelled { break }
-                await audioIO.waitForPlaybackDrain()
             }
-            audioIO.stop()
+
+            if kokoroSessionOpen {
+                audioIO.stop()
+            }
             transition(to: .uninitialized)
         } catch is CancellationError {
+            appleTTSBridge.cancel()
             audioIO.cancelPlaybackImmediately()
             audioIO.stop()
             transition(to: .uninitialized)
         } catch {
+            appleTTSBridge.cancel()
             audioIO.stop()
             logger.error("Teacher speech failed: \(error.localizedDescription)")
             transition(to: .uninitialized)
@@ -2967,11 +3262,17 @@ public final class VoicePipelineManager: ObservableObject {
         try await asrEngine.initialize()
         await asrEngine.resetVAD()
 
+        teacherLiveTranscript = ""
         let pcmStream = audioIO.makePCM16kStream()
         transition(to: .listening)
 
+        var segments: [String] = []
+        var vadInSpeech = false
+        var lastMeaningfulSpeechTime: CFAbsoluteTime = 0
+
         defer {
             audioIO.stop()
+            teacherLiveTranscript = ""
             transition(to: .uninitialized)
         }
 
@@ -2979,19 +3280,61 @@ public final class VoicePipelineManager: ObservableObject {
             if Task.isCancelled { break }
             let asrEvents = try await asrEngine.processPCMChunk(chunk)
             for event in asrEvents {
+                switch event {
+                case .speechStarted:
+                    vadInSpeech = true
+                    lastMeaningfulSpeechTime = CFAbsoluteTimeGetCurrent()
+                case .utteranceFinalized(let transcript, let duration, _):
+                    vadInSpeech = false
+                    let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Ignore isolated micro-noises/echo bursts under 0.30s before any real words arrive.
+                    if clean.isEmpty || (segments.isEmpty && duration < 0.30 && clean.count <= 2) {
+                        continue
+                    }
+                    segments.append(clean)
+                    lastMeaningfulSpeechTime = CFAbsoluteTimeGetCurrent()
+                    teacherLiveTranscript = segments.joined(separator: " ")
+                }
+            }
+
+            let combinedSoFar = segments.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !vadInSpeech,
+               !segments.isEmpty,
+               combinedSoFar.count >= 4,
+               (CFAbsoluteTimeGetCurrent() - lastMeaningfulSpeechTime) >= 1.55 {
+                break
+            }
+        }
+
+        if !Task.isCancelled, let flushedEvents = try? await asrEngine.flushPendingSpeech() {
+            for event in flushedEvents {
                 if case .utteranceFinalized(let transcript, _, _) = event {
                     let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !clean.isEmpty {
-                        return clean
+                        segments.append(clean)
                     }
                 }
             }
         }
-        return ""
+
+        let joined = segments.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !joined.isEmpty else { return "" }
+        return IndicScriptNormalizer.normalize(
+            joined,
+            inputLanguage: inputLanguage,
+            legacyMode: config.asr.scriptDisplayMode
+        )
+    }
+
+    /// Stops mic capture without cancelling the capture task so `captureSingleTeacherUtterance`
+    /// flushes the remaining VAD audio buffer and returns the complete spoken sentence.
+    public func finishTeacherCapture() {
+        audioIO.stop()
     }
 
     public func stopTeacherCapture() {
         audioIO.stop()
+        teacherLiveTranscript = ""
         transition(to: .uninitialized)
     }
 
