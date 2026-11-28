@@ -44,6 +44,21 @@ public final class PipelineViewModel: ObservableObject {
     @Published public private(set) var replayingTurnID: UUID?
     @Published public var bannerErrorMessage: String?
 
+    // MARK: - Teacher Interactive Mode State
+    @Published public var teacherTopic: TeacherTopic = .greetings
+    @Published public private(set) var teacherIsBusy: Bool = false
+    @Published public private(set) var teacherIsListening: Bool = false
+    @Published public private(set) var teacherListeningLabel: String = ""
+    @Published public private(set) var teacherCurrentLesson: TeacherTurnResult?
+    @Published public private(set) var teacherLastEvaluation: TeacherPracticeEvaluation?
+    @Published public private(set) var teacherLastLearnerInput: String = ""
+    @Published public private(set) var teacherPracticeCount: Int = 0
+    @Published public var teacherErrorMessage: String?
+
+    private var teacherCaptureTask: Task<Void, Never>?
+    private var teacherChallengeIndex: Int = 0
+    private var teacherActivePairKey: String = ""
+
     public let assetStore: ModelAssetStore
     private var manager: VoicePipelineManager?
     private var cancellables = Set<AnyCancellable>()
@@ -189,6 +204,150 @@ public final class PipelineViewModel: ObservableObject {
         Task {
             await manager.replayResponse(turn.assistantRomanisedText)
             replayingTurnID = nil
+        }
+    }
+
+    // MARK: - Interactive Teacher Session Actions
+
+    public func openTeacherSession() {
+        Haptics.tap()
+        teacherLastEvaluation = nil
+        teacherLastLearnerInput = ""
+        teacherErrorMessage = nil
+        let pairKey = "\(assetStore.inputLanguage.rawValue)->\(assetStore.outputLanguage.rawValue)"
+        if teacherCurrentLesson == nil || teacherActivePairKey != pairKey {
+            teacherActivePairKey = pairKey
+            teacherChallengeIndex = 0
+            requestTeacherChallenge(learnerInput: nil)
+        }
+    }
+
+    public func selectTeacherTopic(_ topic: TeacherTopic) {
+        Haptics.tap()
+        teacherTopic = topic
+        teacherChallengeIndex = 0
+        teacherLastEvaluation = nil
+        teacherLastLearnerInput = ""
+        requestTeacherChallenge(learnerInput: nil)
+    }
+
+    public func nextTeacherChallenge() {
+        Haptics.tap()
+        teacherChallengeIndex += 1
+        teacherLastEvaluation = nil
+        teacherLastLearnerInput = ""
+        requestTeacherChallenge(learnerInput: nil)
+    }
+
+    public func sendTeacherKnownText(_ rawText: String) {
+        let clean = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        Haptics.tap()
+        teacherLastLearnerInput = clean
+        teacherLastEvaluation = nil
+        requestTeacherChallenge(learnerInput: clean)
+    }
+
+    public func toggleTeacherMic(practicingTarget: Bool) {
+        Haptics.tap()
+        guard let manager else { return }
+
+        if teacherIsListening {
+            teacherCaptureTask?.cancel()
+            teacherCaptureTask = nil
+            teacherIsListening = false
+            teacherListeningLabel = ""
+            Task {
+                await manager.stopTeacherCapture()
+            }
+            return
+        }
+
+        let listenLang = practicingTarget ? assetStore.outputLanguage : assetStore.inputLanguage
+        teacherIsListening = true
+        teacherListeningLabel = practicingTarget
+            ? "Repeat in \(assetStore.outputLanguage.displayName)..."
+            : "Speak in \(assetStore.inputLanguage.displayName)..."
+        teacherErrorMessage = nil
+
+        teacherCaptureTask = Task {
+            do {
+                let transcript = try await manager.captureSingleTeacherUtterance(inputLanguage: listenLang)
+                self.teacherIsListening = false
+                self.teacherListeningLabel = ""
+                let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !clean.isEmpty else { return }
+
+                if practicingTarget, let expectedSpeak = self.teacherCurrentLesson?.targetPhoneticSpeak {
+                    let evaluation = TeacherPhoneticMatcher.score(spoken: clean, expectedPhonetic: expectedSpeak)
+                    self.teacherLastEvaluation = evaluation
+                    if evaluation.matchPercentage >= 50 {
+                        self.teacherPracticeCount += 1
+                    }
+                } else {
+                    self.teacherLastLearnerInput = clean
+                    self.teacherLastEvaluation = nil
+                    self.requestTeacherChallenge(learnerInput: clean)
+                }
+            } catch is CancellationError {
+                self.teacherIsListening = false
+                self.teacherListeningLabel = ""
+            } catch {
+                self.teacherIsListening = false
+                self.teacherListeningLabel = ""
+                self.teacherErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    public func replayTeacherAudio(slow: Bool) {
+        Haptics.tap()
+        guard let manager, let speakText = teacherCurrentLesson?.targetPhoneticSpeak, !speakText.isEmpty else { return }
+        let speed: Float = slow ? 0.78 : Float(assetStore.ttsSpeed)
+        Task {
+            await manager.replayResponse(speakText, speedOverride: speed)
+        }
+    }
+
+    public func closeTeacherSession() {
+        teacherCaptureTask?.cancel()
+        teacherCaptureTask = nil
+        teacherIsListening = false
+        teacherListeningLabel = ""
+        Task {
+            await manager?.stopTeacherCapture()
+            let input = assetStore.inputLanguage
+            let output = assetStore.outputLanguage
+            let mode = assetStore.interactionMode
+            await manager?.updateLanguageSettings(input: input, output: output, mode: mode)
+        }
+    }
+
+    private func requestTeacherChallenge(learnerInput: String?) {
+        guard let manager else { return }
+        teacherIsBusy = true
+        teacherErrorMessage = nil
+        let topic = teacherTopic
+        let nativeLang = assetStore.inputLanguage
+        let targetLang = assetStore.outputLanguage
+        let idx = teacherChallengeIndex
+
+        Task {
+            let lesson = await manager.generateTeacherTurn(
+                topic: topic,
+                nativeLanguage: nativeLang,
+                targetLanguage: targetLang,
+                learnerInput: learnerInput,
+                challengeIndex: idx
+            )
+            self.teacherCurrentLesson = lesson
+            self.teacherIsBusy = false
+            if learnerInput != nil {
+                self.teacherPracticeCount += 1
+            }
+            if !lesson.targetPhoneticSpeak.isEmpty {
+                await manager.replayResponse(lesson.targetPhoneticSpeak, speedOverride: Float(assetStore.ttsSpeed))
+            }
         }
     }
 

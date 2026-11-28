@@ -15,6 +15,7 @@ struct VoiceAssistantView: View {
     @State private var showModelSetup = false
     @State private var showSettings = false
     @State private var showTypeInput = false
+    @State private var showTeacherSheet = false
 
     private var isActiveSession: Bool {
         switch viewModel.pipelineState {
@@ -98,6 +99,11 @@ struct VoiceAssistantView: View {
                 ) { typedText in
                     viewModel.submitTypedTurn(typedText)
                 }
+            }
+            .sheet(isPresented: $showTeacherSheet, onDismiss: {
+                viewModel.closeTeacherSession()
+            }) {
+                TeacherSessionView(viewModel: viewModel, assetStore: assetStore)
             }
         }
     }
@@ -218,6 +224,41 @@ struct VoiceAssistantView: View {
                     }
                 }
             }
+
+            Button {
+                viewModel.openTeacherSession()
+                showTeacherSheet = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "graduationcap.fill")
+                        .foregroundStyle(Color.amberColor)
+                    Text("Teacher")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                    Text("· Practice \(assetStore.outputLanguage.displayName)")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(Color.amberColor)
+                }
+                .font(.caption)
+                .padding(.vertical, 7)
+                .padding(.horizontal, 12)
+                .background(
+                    LinearGradient(
+                        colors: [Color.amberColor.opacity(0.20), Color.indigo.opacity(0.22)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 10)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.amberColor.opacity(0.35), lineWidth: 1)
+                )
+            }
+            .disabled(isActiveSession)
         }
     }
 
@@ -909,4 +950,302 @@ private struct IndicKeypadView: View {
 
 private extension Color {
     static let amberColor = Color(red: 1.0, green: 0.72, blue: 0.22)
+}
+
+// MARK: - Interactive Teacher Mode View
+
+private struct TeacherSessionView: View {
+    @ObservedObject var viewModel: PipelineViewModel
+    @ObservedObject var assetStore: ModelAssetStore
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var showKnownKeyboardSheet = false
+
+    private var knownLanguage: PipelineLanguage {
+        assetStore.inputLanguage == .auto ? .punjabi : assetStore.inputLanguage
+    }
+
+    private var targetLanguage: PipelineLanguage {
+        assetStore.outputLanguage
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                // Header status: language pair & streak counter
+                HStack {
+                    Label("\(knownLanguage.displayName) → Learn \(targetLanguage.displayName)", systemImage: "graduationcap.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.amberColor)
+                    Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "flame.fill")
+                            .foregroundStyle(.orange)
+                        Text("\(viewModel.teacherPracticeCount) practiced")
+                            .font(.caption2.weight(.semibold).monospacedDigit())
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.08), in: Capsule())
+                }
+                .padding(.horizontal)
+
+                // Topic Selector Chips
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(TeacherTopic.allCases) { topic in
+                            let selected = (viewModel.teacherTopic == topic)
+                            Button {
+                                viewModel.selectTeacherTopic(topic)
+                            } label: {
+                                Label(topic.title, systemImage: topic.iconName)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 7)
+                                    .foregroundStyle(selected ? .white : .secondary)
+                                    .background(
+                                        selected ? Color.indigo : Color.white.opacity(0.08),
+                                        in: Capsule()
+                                    )
+                            }
+                            .disabled(viewModel.teacherIsBusy || viewModel.teacherIsListening)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+
+                if let err = viewModel.teacherErrorMessage {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal)
+                }
+
+                // Main Interactive Lesson Card
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if viewModel.teacherIsBusy {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                    .tint(Color.amberColor)
+                                Text("Teacher is preparing your \(targetLanguage.displayName) lesson...")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 28)
+                        } else if let lesson = viewModel.teacherCurrentLesson {
+                            if !viewModel.teacherLastLearnerInput.isEmpty {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("YOU SAID (\(knownLanguage.displayName.uppercased()))")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.secondary)
+                                    Text(viewModel.teacherLastLearnerInput)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.cyan)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                                .background(Color.cyan.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                            }
+
+                            // Teacher prompt in learner's language
+                            VStack(alignment: .leading, spacing: 6) {
+                                Label("AI Teacher", systemImage: "person.wave.2.fill")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(Color.amberColor)
+                                Text(lesson.teacherPromptText)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.white.opacity(0.95))
+                            }
+
+                            // Target phrase box + Audio Listen controls
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("LEARN & SPEAK IN \(targetLanguage.displayName.uppercased())")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.mint)
+
+                                Text(lesson.targetNativeScript)
+                                    .font(.title3.weight(.semibold))
+                                    .foregroundStyle(.white)
+
+                                if lesson.targetPhoneticSpeak.lowercased() != lesson.targetNativeScript.lowercased() {
+                                    Text("Say: \(lesson.targetPhoneticSpeak)")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.cyan)
+                                }
+
+                                if !lesson.grammarTip.isEmpty {
+                                    Text("💡 \(lesson.grammarTip)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                HStack(spacing: 10) {
+                                    Button {
+                                        viewModel.replayTeacherAudio(slow: false)
+                                    } label: {
+                                        Label("Listen", systemImage: "speaker.wave.2.fill")
+                                            .font(.caption.weight(.semibold))
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 8)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.cyan)
+                                    .disabled(viewModel.teacherIsListening)
+
+                                    Button {
+                                        viewModel.replayTeacherAudio(slow: true)
+                                    } label: {
+                                        Label("Slow (0.78x)", systemImage: "tortoise.fill")
+                                            .font(.caption.weight(.semibold))
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 8)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(.mint)
+                                    .disabled(viewModel.teacherIsListening)
+                                }
+                            }
+                            .padding(14)
+                            .background(Color.indigo.opacity(0.24), in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color.mint.opacity(0.28), lineWidth: 1)
+                            )
+
+                            // Pronunciation Score Card (after user practices speaking)
+                            if let eval = viewModel.teacherLastEvaluation {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(eval.matchPercentage >= 75 ? "🌟 Great Pronunciation!" : "🎯 Practice Feedback")
+                                            .font(.subheadline.weight(.bold))
+                                            .foregroundStyle(eval.matchPercentage >= 75 ? Color.mint : Color.amberColor)
+                                        Spacer()
+                                        Text("\(eval.matchPercentage)%")
+                                            .font(.headline.monospacedDigit())
+                                            .foregroundStyle(eval.matchPercentage >= 75 ? Color.mint : Color.amberColor)
+                                    }
+                                    Text(eval.feedbackMessage)
+                                        .font(.caption)
+                                        .foregroundStyle(.white)
+                                    Text("Heard: \"\(eval.spokenPhonetic)\"")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(12)
+                                .background(
+                                    (eval.matchPercentage >= 75 ? Color.green : Color.orange).opacity(0.16),
+                                    in: RoundedRectangle(cornerRadius: 12)
+                                )
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+
+                if viewModel.teacherIsListening {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 10, height: 10)
+                        Text(viewModel.teacherListeningLabel)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .padding(.vertical, 6)
+                }
+
+                // Interactive Teacher Controls
+                VStack(spacing: 8) {
+                    HStack(spacing: 10) {
+                        Button {
+                            viewModel.toggleTeacherMic(practicingTarget: false)
+                        } label: {
+                            Label(
+                                viewModel.teacherIsListening ? "Stop Mic" : "Ask in \(knownLanguage.displayName)",
+                                systemImage: viewModel.teacherIsListening ? "stop.fill" : "mic.fill"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(viewModel.teacherIsListening ? .red : .indigo)
+                        .disabled(viewModel.teacherIsBusy)
+
+                        Button {
+                            viewModel.toggleTeacherMic(practicingTarget: true)
+                        } label: {
+                            Label(
+                                viewModel.teacherIsListening ? "Stop Mic" : "Practice \(targetLanguage.displayName)",
+                                systemImage: "waveform.badge.mic"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(viewModel.teacherIsListening ? .red : .mint)
+                        .disabled(viewModel.teacherIsBusy || viewModel.teacherCurrentLesson == nil)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            showKnownKeyboardSheet = true
+                        } label: {
+                            Label("Type in \(knownLanguage.displayName)", systemImage: "keyboard")
+                                .font(.caption.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.cyan)
+                        .disabled(viewModel.teacherIsBusy || viewModel.teacherIsListening)
+
+                        Button {
+                            viewModel.nextTeacherChallenge()
+                        } label: {
+                            Label("Next Lesson", systemImage: "arrow.right.circle.fill")
+                                .font(.caption.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(Color.amberColor)
+                        .disabled(viewModel.teacherIsBusy || viewModel.teacherIsListening)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
+            .padding(.top, 8)
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.05, green: 0.07, blue: 0.13), Color(red: 0.09, green: 0.11, blue: 0.19)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            )
+            .navigationTitle("Language Teacher")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showKnownKeyboardSheet) {
+                TypeInputSheet(
+                    inputLanguage: knownLanguage,
+                    outputLanguage: targetLanguage,
+                    interactionMode: .translate
+                ) { typed in
+                    viewModel.sendTeacherKnownText(typed)
+                }
+            }
+        }
+    }
 }

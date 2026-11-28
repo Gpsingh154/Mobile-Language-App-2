@@ -210,6 +210,155 @@ public enum GemmaSystemPrompt {
         </system_instructions>
         """
     }
+
+    public static func buildTeacherPrompt(
+        nativeLanguage: PipelineLanguage,
+        targetLanguage: PipelineLanguage,
+        topic: TeacherTopic
+    ) -> String {
+        let known = (nativeLanguage == .auto) ? PipelineLanguage.punjabi : nativeLanguage
+        let target = (targetLanguage == .auto) ? PipelineLanguage.english : targetLanguage
+
+        let targetFormat: String
+        if target == .english {
+            targetFormat = """
+            TARGET_NATIVE: <natural English phrase to learn>
+            TARGET_SPEAK: <same exact English phrase>
+            """
+        } else {
+            targetFormat = """
+            TARGET_NATIVE: <natural \(target.displayName) phrase in pure \(target.nativeScriptLabel) script>
+            TARGET_SPEAK: <same exact \(target.displayName) phrase written phonetically in English Latin letters for text-to-speech>
+            """
+        }
+
+        let promptLangNote = (known == .english)
+            ? "friendly simple English"
+            : "friendly \(known.displayName) (written in \(known.nativeScriptLabel) script or simple Romanised \(known.displayName))"
+
+        return """
+        <system_instructions>
+            <role>You are a warm, interactive, encouraging offline Language Teacher helping a user who knows \(known.displayName) learn \(target.displayName) on topic: \(topic.title).</role>
+            <behavior>
+                - If the user message asks for a NEW_CHALLENGE, invent a practical everyday \(topic.title) question/scenario in \(promptLangNote), and provide ONE useful \(target.displayName) phrase for them to learn and practice speaking.
+                - If the user message provides something they said or typed in \(known.displayName), praise them warmly in \(promptLangNote), translate their exact sentence cleanly into \(target.displayName), give a brief 1-line pronunciation/grammar tip, and invite them to tap Practice Speaking to repeat it aloud!
+            </behavior>
+            <strict_output_format>
+                Always output EXACTLY these 4 labeled lines and NOTHING else:
+                PROMPT: <1-2 short interactive sentences speaking to the student in \(promptLangNote)>
+                \(targetFormat)
+                TIP: <1 short helpful tip in \(promptLangNote)>
+            </strict_output_format>
+        </system_instructions>
+        """
+    }
+}
+
+// MARK: - Teacher Mode Models & Phonetic Scorer
+
+public enum TeacherTopic: String, CaseIterable, Identifiable, Sendable {
+    case greetings = "Greetings"
+    case travel = "Travel"
+    case food = "Food & Dining"
+    case shopping = "Shopping"
+    case daily = "Daily Chat"
+    case numbers = "Numbers & Time"
+
+    public var id: String { rawValue }
+    public var title: String { rawValue }
+
+    public var iconName: String {
+        switch self {
+        case .greetings: return "hand.wave.fill"
+        case .travel: return "airplane"
+        case .food: return "fork.knife"
+        case .shopping: return "bag.fill"
+        case .daily: return "bubble.left.and.bubble.right.fill"
+        case .numbers: return "clock.fill"
+        }
+    }
+}
+
+public struct TeacherTurnResult: Equatable, Sendable {
+    public let teacherPromptText: String
+    public let targetNativeScript: String
+    public let targetPhoneticSpeak: String
+    public let grammarTip: String
+}
+
+public struct TeacherPracticeEvaluation: Equatable, Sendable {
+    public let matchPercentage: Int
+    public let spokenPhonetic: String
+    public let expectedPhonetic: String
+    public let feedbackMessage: String
+}
+
+public enum TeacherPhoneticMatcher {
+    public static func score(spoken: String, expectedPhonetic: String) -> TeacherPracticeEvaluation {
+        let spokenClean = normalizeForMatch(IndicScriptNormalizer.toPhoneticLatin(spoken))
+        let expectedClean = normalizeForMatch(IndicScriptNormalizer.toPhoneticLatin(expectedPhonetic))
+
+        guard !spokenClean.isEmpty, !expectedClean.isEmpty else {
+            return TeacherPracticeEvaluation(
+                matchPercentage: 0,
+                spokenPhonetic: spoken,
+                expectedPhonetic: expectedPhonetic,
+                feedbackMessage: "Could not hear clearly. Tap Listen Slowly and try once more!"
+            )
+        }
+
+        let dist = levenshtein(Array(spokenClean), Array(expectedClean))
+        let maxLen = max(spokenClean.count, expectedClean.count)
+        let rawPct = max(0, min(100, Int(round((1.0 - Double(dist) / Double(maxLen)) * 100.0))))
+
+        let feedback: String
+        if rawPct >= 80 {
+            feedback = "Excellent pronunciation! You nailed it (\(rawPct)%)."
+        } else if rawPct >= 55 {
+            feedback = "Good effort (\(rawPct)%)! Try listening slowly once and repeating."
+        } else {
+            feedback = "Keep practicing (\(rawPct)%)! Tap Slow (0.78x) to hear each syllable."
+        }
+
+        return TeacherPracticeEvaluation(
+            matchPercentage: rawPct,
+            spokenPhonetic: spokenClean,
+            expectedPhonetic: expectedClean,
+            feedbackMessage: feedback
+        )
+    }
+
+    private static func normalizeForMatch(_ input: String) -> String {
+        let lowered = input.lowercased()
+            .replacingOccurrences(of: "aa", with: "a")
+            .replacingOccurrences(of: "ee", with: "i")
+            .replacingOccurrences(of: "oo", with: "u")
+        let allowed = lowered.unicodeScalars.filter {
+            ($0.value >= 97 && $0.value <= 122) || $0.value == 32
+        }
+        return String(String.UnicodeScalarView(allowed))
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func levenshtein(_ a: [Character], _ b: [Character]) -> Int {
+        var dp = Array(0...b.count)
+        for i in 1...a.count {
+            var prev = dp[0]
+            dp[0] = i
+            for j in 1...b.count {
+                let temp = dp[j]
+                if a[i - 1] == b[j - 1] {
+                    dp[j] = prev
+                } else {
+                    dp[j] = min(prev, dp[j], dp[j - 1]) + 1
+                }
+                prev = temp
+            }
+        }
+        return dp[b.count]
+    }
 }
 
 // MARK: - Configuration & Domain Models
@@ -2416,7 +2565,7 @@ public final class VoicePipelineManager: ObservableObject {
     }
 
     /// Replays a previously generated response aloud via Kokoro TTS so the user can listen and practice speaking.
-    public func replayResponse(_ displayText: String) async {
+    public func replayResponse(_ displayText: String, speedOverride: Float? = nil) async {
         let trimmed = displayText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -2437,10 +2586,11 @@ public final class VoicePipelineManager: ObservableObject {
             if let tail = chunker.flush() { clauses.append(tail) }
             if clauses.isEmpty { clauses = [speakSource] }
 
+            let activeSpeed = speedOverride ?? config.tts.speed
             for clause in clauses {
                 let samples24k = try await ttsEngine.synthesize(
                     phoneticClause: clause,
-                    speed: config.tts.speed
+                    speed: activeSpeed
                 )
                 await audioIO.enqueuePlayback(samples24k: samples24k, maxQueuedBuffers: 2)
             }
@@ -2457,6 +2607,236 @@ public final class VoicePipelineManager: ObservableObject {
             logger.error("Replay failed: \(error.localizedDescription)")
             transition(to: .error(error.localizedDescription))
         }
+    }
+
+    // MARK: - Teacher Interactive Session Support
+
+    private var teacherSingleCaptureTask: Task<String?, Never>?
+
+    public func generateTeacherTurn(
+        topic: TeacherTopic,
+        nativeLanguage: PipelineLanguage,
+        targetLanguage: PipelineLanguage,
+        learnerInput: String?,
+        challengeIndex: Int
+    ) async -> TeacherTurnResult {
+        if state == .listening || state == .speaking || state == .thinking {
+            await stopPipeline()
+        }
+
+        let teacherPrompt = GemmaSystemPrompt.buildTeacherPrompt(
+            nativeLanguage: nativeLanguage,
+            targetLanguage: targetLanguage,
+            topic: topic
+        )
+
+        var rawOutput = ""
+        let llmAlreadyLoaded = await llmBrain.isLoaded
+        if llmAlreadyLoaded || MemoryBudgetManager.availableMemoryMB() >= 1000 {
+            do {
+                if config.residencyPolicy != .alwaysResident {
+                    await asrEngine.unloadModel()
+                    if !llmAlreadyLoaded {
+                        await ttsEngine.unloadSession()
+                    }
+                }
+                if !llmAlreadyLoaded {
+                    try await llmBrain.loadEngine()
+                }
+                try await llmBrain.updateSystemPrompt(teacherPrompt)
+
+                let query: String
+                if let learnerInput, !learnerInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    query = "The student said/typed in \(nativeLanguage.displayName): \"\(learnerInput)\". Translate it into \(targetLanguage.displayName) for them to learn and practice."
+                } else {
+                    query = "NEW_CHALLENGE #\(challengeIndex + 1) on topic '\(topic.title)'. Ask the student an interactive starter question in \(nativeLanguage.displayName) and teach one useful \(targetLanguage.displayName) phrase."
+                }
+
+                let stream = await llmBrain.streamResponse(for: query)
+                for try await token in stream {
+                    rawOutput.append(token)
+                }
+            } catch {
+                logger.warning("Teacher Gemma 4 fallback: \(error.localizedDescription)")
+            }
+        }
+
+        let result = Self.parseTeacherOutput(
+            raw: rawOutput,
+            topic: topic,
+            nativeLanguage: nativeLanguage,
+            targetLanguage: targetLanguage,
+            learnerInput: learnerInput,
+            challengeIndex: challengeIndex
+        )
+        return result
+    }
+
+    public func captureSingleTeacherUtterance(inputLanguage: PipelineLanguage) async throws -> String {
+        if state == .listening || state == .speaking || state == .thinking {
+            await stopPipeline()
+        }
+        let granted = await audioIO.requestMicrophonePermission()
+        guard granted else {
+            throw VoicePipelineError.microphonePermissionDenied
+        }
+        if inputLanguage == .english {
+            await requestEnglishSpeechPermissionIfNeeded()
+        }
+        await asrEngine.updateInputLanguage(inputLanguage, legacyMode: config.asr.scriptDisplayMode)
+        try audioIO.configureAndStart()
+        try await asrEngine.initialize()
+        await asrEngine.resetVAD()
+
+        let pcmStream = audioIO.makePCM16kStream()
+        transition(to: .listening)
+
+        defer {
+            audioIO.stop()
+            transition(to: .uninitialized)
+        }
+
+        for await chunk in pcmStream {
+            if Task.isCancelled { break }
+            let asrEvents = try await asrEngine.processPCMChunk(chunk)
+            for event in asrEvents {
+                if case .utteranceFinalized(let transcript, _, _) = event {
+                    let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !clean.isEmpty {
+                        return clean
+                    }
+                }
+            }
+        }
+        return ""
+    }
+
+    public func stopTeacherCapture() {
+        audioIO.stop()
+        transition(to: .uninitialized)
+    }
+
+    private static func parseTeacherOutput(
+        raw: String,
+        topic: TeacherTopic,
+        nativeLanguage: PipelineLanguage,
+        targetLanguage: PipelineLanguage,
+        learnerInput: String?,
+        challengeIndex: Int
+    ) -> TeacherTurnResult {
+        var prompt = ""
+        var nativeLine = ""
+        var speakLine = ""
+        var tip = ""
+
+        for line in raw.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let upper = trimmed.uppercased()
+            if upper.hasPrefix("PROMPT:") {
+                prompt = String(trimmed.dropFirst("PROMPT:".count)).trimmingCharacters(in: .whitespaces)
+            } else if upper.hasPrefix("TARGET_NATIVE:") {
+                nativeLine = String(trimmed.dropFirst("TARGET_NATIVE:".count)).trimmingCharacters(in: .whitespaces)
+            } else if upper.hasPrefix("TARGET_SPEAK:") {
+                speakLine = String(trimmed.dropFirst("TARGET_SPEAK:".count)).trimmingCharacters(in: .whitespaces)
+            } else if upper.hasPrefix("TIP:") {
+                tip = String(trimmed.dropFirst("TIP:".count)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        if !speakLine.isEmpty || !nativeLine.isEmpty {
+            let resolvedSpeak = !speakLine.isEmpty ? IndicScriptNormalizer.toPhoneticLatin(speakLine) : IndicScriptNormalizer.toPhoneticLatin(nativeLine)
+            let resolvedNative = !nativeLine.isEmpty ? nativeLine : speakLine
+            let resolvedPrompt = !prompt.isEmpty ? prompt : "Listen carefully and practice repeating this phrase!"
+            return TeacherTurnResult(
+                teacherPromptText: resolvedPrompt,
+                targetNativeScript: resolvedNative,
+                targetPhoneticSpeak: resolvedSpeak,
+                grammarTip: tip
+            )
+        }
+
+        return builtInTeacherFallback(
+            topic: topic,
+            nativeLanguage: nativeLanguage,
+            targetLanguage: targetLanguage,
+            learnerInput: learnerInput,
+            challengeIndex: challengeIndex
+        )
+    }
+
+    private static func builtInTeacherFallback(
+        topic: TeacherTopic,
+        nativeLanguage: PipelineLanguage,
+        targetLanguage: PipelineLanguage,
+        learnerInput: String?,
+        challengeIndex: Int
+    ) -> TeacherTurnResult {
+        let knownName = nativeLanguage.displayName
+        let targetName = targetLanguage.displayName
+        let starterPairs: [TeacherTopic: [(native: String, speak: String, meaning: String)]] = [
+            .greetings: [
+                ("Hello, how are you?", "Hello, how are you?", "Greeting someone politely"),
+                ("Nice to meet you!", "Nice to meet you!", "Friendly introduction")
+            ],
+            .travel: [
+                ("Where is the train station?", "Where is the train station?", "Asking for directions"),
+                ("How far is it from here?", "How far is it from here?", "Checking distance")
+            ],
+            .food: [
+                ("Please bring some water.", "Please bring some water.", "Ordering at a restaurant"),
+                ("The food is very delicious!", "The food is very delicious!", "Complimenting a meal")
+            ],
+            .shopping: [
+                ("How much does this cost?", "How much does this cost?", "Asking the price"),
+                ("Can you give a small discount?", "Can you give a small discount?", "Polite bargaining")
+            ],
+            .daily: [
+                ("What are you doing today?", "What are you doing today?", "Casual daily conversation"),
+                ("I am learning a new language.", "I am learning a new language.", "Sharing your goal")
+            ],
+            .numbers: [
+                ("What time is it right now?", "What time is it right now?", "Asking the time"),
+                ("Please give me two tickets.", "Please give me two tickets.", "Using numbers in public")
+            ]
+        ]
+
+        let targetSamples: [PipelineLanguage: (native: String, speak: String)] = [
+            .punjabi: ("ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਤੁਸੀਂ ਕਿਵੇਂ ਹੋ?", "Sat sri akaal, tusi kiven ho?"),
+            .hindi: ("नमस्ते, आप कैसे हैं?", "Namaste, aap kaise hain?"),
+            .english: ("Hello, how are you doing today?", "Hello, how are you doing today?"),
+            .bengali: ("নমস্কার, আপনি কেমন আছেন?", "Nomoshkar, aapni kemon achhen?"),
+            .tamil: ("வணக்கம், நீங்கள் எப்படி இருக்கிறீர்கள்?", "Vanakkam, neengal eppadi irukkireergal?"),
+            .telugu: ("నమస్కారం, మీరు ఎలా ఉన్నారు?", "Namaskaram, meeru ela unnaaru?"),
+            .marathi: ("नमस्कार, तुम्ही कसे आहात?", "Namaskar, tumhi kase aahaat?"),
+            .gujarati: ("નમસ્તે, તમે કેમ છો?", "Namaste, tame kem chho?"),
+            .kannada: ("ನಮಸ್ಕಾರ, ನೀವು ಹೇಗಿದ್ದೀರಿ?", "Namaskara, neevu hegiddiri?")
+        ]
+
+        let list = starterPairs[topic] ?? starterPairs[.greetings]!
+        let item = list[challengeIndex % list.count]
+
+        if targetLanguage == .english {
+            let promptText = (learnerInput != nil)
+                ? "Great! In English you can say this phrase. Tap Practice Speaking to repeat it:"
+                : "Let's practice \(topic.title) in English! Try translating or repeating this phrase (\(item.meaning)):"
+            return TeacherTurnResult(
+                teacherPromptText: promptText,
+                targetNativeScript: item.native,
+                targetPhoneticSpeak: item.speak,
+                grammarTip: "Speak smoothly and tap Slow (0.78x) anytime to hear each word clearly."
+            )
+        }
+
+        let targetPair = targetSamples[targetLanguage] ?? ("Hello!", "Hello!")
+        let promptText = (learnerInput != nil)
+            ? "Here is how to say your phrase in \(targetName). Listen and try repeating it:"
+            : "Welcome to \(topic.title)! Say something in \(knownName) using Mic or Keyboard, or practice this \(targetName) starter:"
+        return TeacherTurnResult(
+            teacherPromptText: promptText,
+            targetNativeScript: targetPair.native,
+            targetPhoneticSpeak: targetPair.speak,
+            grammarTip: "Tap Listen Slowly (0.78x) to hear every syllable clearly, then tap Practice Speaking!"
+        )
     }
 
     private static func extractSpeakableFromDisplay(_ displayText: String) -> String {
